@@ -125,6 +125,19 @@ class ChatRequest(BaseModel):
     conversation_history: List[Dict[str, str]] = Field(default_factory=list)
 
 
+class AUCPredictionInput(BaseModel):
+    """Dane wejściowe dla pełnego, offline'owego modelu AUC."""
+
+    features: Dict[str, Optional[Any]] = Field(
+        default_factory=dict,
+        description="Słownik wartości cech zgodny z feature_names/raw_feature_names modelu AUC",
+    )
+    model_key: Optional[str] = Field(
+        None,
+        description="Opcjonalny model AUC, np. stacking, catboost, random_forest; domyślnie najlepszy",
+    )
+
+
 # ============================================================================
 # OUTPUT SCHEMAS
 # ============================================================================

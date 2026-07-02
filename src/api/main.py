@@ -8,6 +8,7 @@ wyjaśnień XAI i agenta konwersacyjnego.
 import os
 import sys
 import time
+from functools import lru_cache
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
@@ -42,6 +43,8 @@ from .schemas import (
     MultiModelPredictionOutput, ModelPrediction,
     # DALEX/EBM schemas
     DALEXExplanation, EBMExplanation,
+    # AUC offline model schemas
+    AUCPredictionInput,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -341,6 +344,94 @@ def get_demo_explanation(patient: PatientInput) -> dict:
     }
 
 
+def _auc_models_dir() -> Path:
+    """Katalog artefaktów pełnego toru AUC."""
+    return Path(os.getenv("AUC_MODELS_DIR", "models/saved/auc_all"))
+
+
+@lru_cache(maxsize=4)
+def _load_auc_metadata(models_dir: str) -> Dict[str, Any]:
+    metadata_path = Path(models_dir) / "auc_metadata.json"
+    if not metadata_path.exists():
+        raise HTTPException(status_code=404, detail=f"Brak metadanych modelu AUC: {metadata_path}")
+    return json.loads(metadata_path.read_text(encoding="utf-8"))
+
+
+@lru_cache(maxsize=4)
+def _load_auc_comparison(models_dir: str) -> List[Dict[str, Any]]:
+    comparison_path = Path(models_dir) / "auc_model_comparison.json"
+    if not comparison_path.exists():
+        raise HTTPException(status_code=404, detail=f"Brak porównania modeli AUC: {comparison_path}")
+    return json.loads(comparison_path.read_text(encoding="utf-8"))
+
+
+@lru_cache(maxsize=4)
+def _load_auc_preprocessors(models_dir: str):
+    base = Path(models_dir)
+    required = {
+        "imputer": base / "auc_imputer.joblib",
+        "selector": base / "auc_selector.joblib",
+        "scaler": base / "auc_scaler.joblib",
+    }
+    missing = [str(path) for path in required.values() if not path.exists()]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Brak artefaktów preprocessingu AUC: {missing}")
+    return (
+        joblib.load(required["imputer"]),
+        joblib.load(required["selector"]),
+        joblib.load(required["scaler"]),
+    )
+
+
+@lru_cache(maxsize=32)
+def _load_auc_prediction_model(models_dir: str, requested_model_key: Optional[str]):
+    metadata = _load_auc_metadata(models_dir)
+    comparison = _load_auc_comparison(models_dir)
+    available_models = {str(row["model"]) for row in comparison if "model" in row}
+    best_model = str(metadata.get("best_model", ""))
+    model_key = best_model if requested_model_key in (None, "", "best") else str(requested_model_key)
+
+    if model_key not in available_models:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Nieznany model AUC: {model_key}. Dostępne: {sorted(available_models)}",
+        )
+
+    filename = "best_auc_model.joblib" if model_key == best_model else f"{model_key}_model.joblib"
+    model_path = Path(models_dir) / filename
+    if not model_path.exists():
+        raise HTTPException(status_code=404, detail=f"Brak modelu AUC: {model_path}")
+    return model_key, joblib.load(model_path)
+
+
+def _build_auc_raw_frame(features: Dict[str, Any], raw_feature_names: List[str]) -> pd.DataFrame:
+    """Zbuduj jednowierszową ramkę w kolejności użytej przy treningu AUC."""
+    row: Dict[str, float] = {}
+    for feature_name in raw_feature_names:
+        value = features.get(feature_name, np.nan)
+        if value is None or value == "":
+            row[feature_name] = np.nan
+            continue
+        try:
+            row[feature_name] = float(value)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cecha AUC '{feature_name}' musi być liczbą albo null",
+            )
+    return pd.DataFrame([row], columns=raw_feature_names)
+
+
+def _predict_positive_probability(model, X: np.ndarray) -> np.ndarray:
+    if hasattr(model, "predict_proba"):
+        return np.asarray(model.predict_proba(X))[:, 1]
+    if hasattr(model, "decision_function"):
+        from scipy.special import expit
+
+        return expit(model.decision_function(X))
+    return np.asarray(model.predict(X), dtype=float)
+
+
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
@@ -366,6 +457,28 @@ async def health_check():
         api_version="1.0.0",
         timestamp=datetime.now().isoformat()
     )
+
+
+@app.get("/models/auc", tags=["Info"])
+async def auc_model_info():
+    """Metadane pełnego, offline'owego treningu AUC."""
+    models_dir = str(_auc_models_dir())
+    metadata = _load_auc_metadata(models_dir)
+    comparison = _load_auc_comparison(models_dir)
+
+    return {
+        "available": True,
+        "models_dir": models_dir,
+        "best_model": metadata.get("best_model"),
+        "n_features": metadata.get("n_features"),
+        "feature_names": metadata.get("feature_names", []),
+        "raw_feature_names": metadata.get("raw_feature_names", []),
+        "dropped_identifier_columns": metadata.get("dropped_identifier_columns", []),
+        "dropped_correlated_features": metadata.get("dropped_correlated_features", []),
+        "train_samples": metadata.get("train_samples"),
+        "test_samples": metadata.get("test_samples"),
+        "models": comparison,
+    }
 
 
 @app.post("/predict", response_model=PredictionOutput, tags=["Prediction"])
@@ -396,6 +509,47 @@ async def predict(patient: PatientInput):
     except Exception as e:
         logger.error(f"Błąd predykcji: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/predict/auc", tags=["Prediction"])
+async def predict_auc(request: AUCPredictionInput):
+    """
+    Predykcja z pełnego modelu AUC trenowanego na wszystkich cechach klinicznych.
+
+    Ten endpoint przyjmuje słownik cech, bo pełny model ma inny kontrakt wejścia
+    niż 20-cechowy formularz używany przez standardowy `/predict`.
+    """
+    models_dir = str(_auc_models_dir())
+    metadata = _load_auc_metadata(models_dir)
+    raw_feature_names = metadata.get("raw_feature_names") or metadata.get("feature_names")
+    if not raw_feature_names:
+        raise HTTPException(status_code=500, detail="Metadane AUC nie zawierają listy cech")
+
+    model_key, model = _load_auc_prediction_model(models_dir, request.model_key)
+    imputer, selector, scaler = _load_auc_preprocessors(models_dir)
+
+    raw_frame = _build_auc_raw_frame(request.features, raw_feature_names)
+    X_imputed = imputer.transform(raw_frame)
+    X_selected = selector.transform(X_imputed)
+    X_scaled = scaler.transform(X_selected)
+
+    probability = float(_predict_positive_probability(model, X_scaled)[0])
+    prediction = int(probability > 0.5)
+    missing_features = [
+        name for name in raw_feature_names
+        if name not in request.features or request.features.get(name) in (None, "")
+    ]
+
+    return {
+        "probability": probability,
+        "risk_level": get_risk_level_from_probability(probability),
+        "prediction": prediction,
+        "model_key": model_key,
+        "n_features": int(metadata.get("n_features", X_scaled.shape[1])),
+        "raw_input_features": len(raw_feature_names),
+        "missing_features_count": len(missing_features),
+        "missing_features_sample": missing_features[:20],
+    }
 
 
 # ============================================================================

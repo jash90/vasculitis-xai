@@ -136,11 +136,28 @@ class TestAPIEndpoints:
         assert "/" in routes
         assert "/health" in routes
         assert "/predict" in routes
+        assert "/predict/auc" in routes
+        assert "/models/auc" in routes
         assert "/explain/shap" in routes
         assert "/explain/lime" in routes
         assert "/explain/patient" in routes
         assert "/model/info" in routes
         assert "/chat" in routes
+
+    def test_auc_raw_frame_preserves_training_order_and_missing_values(self):
+        """Test budowania wejścia dla pełnego modelu AUC."""
+        import numpy as np
+        from src.api.main import _build_auc_raw_frame
+
+        frame = _build_auc_raw_frame(
+            {"B": "2.5", "A": None},
+            ["A", "B", "C"],
+        )
+
+        assert frame.columns.tolist() == ["A", "B", "C"]
+        assert np.isnan(frame.iloc[0]["A"])
+        assert frame.iloc[0]["B"] == 2.5
+        assert np.isnan(frame.iloc[0]["C"])
 
 
 # Testy integracyjne (wymagają uruchomionego serwera)
