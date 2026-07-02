@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/predict", "destination": "https://vasculitis-xai-api-production.up.railway.app/predict" },
+    { "source": "/predict/:path*", "destination": "https://vasculitis-xai-api-production.up.railway.app/predict/:path*" },
+    { "source": "/explain/:path*", "destination": "https://vasculitis-xai-api-production.up.railway.app/explain/:path*" },
+    { "source": "/chat", "destination": "https://vasculitis-xai-api-production.up.railway.app/chat" },
+    { "source": "/config/:path*", "destination": "https://vasculitis-xai-api-production.up.railway.app/config/:path*" },
+    { "source": "/health", "destination": "https://vasculitis-xai-api-production.up.railway.app/health" },
+    { "source": "/agent/:path*", "destination": "https://vasculitis-xai-api-production.up.railway.app/agent/:path*" }
+  ]
+}

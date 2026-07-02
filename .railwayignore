@@ -1,0 +1,39 @@
+# Używane z `railway up --no-gitignore`, więc .gitignore NIE jest stosowany.
+# Tu wykluczamy wszystko, czego obraz backendu nie potrzebuje,
+# ale ŚWIADOMIE NIE wykluczamy models/saved/*.joblib — mają trafić do obrazu.
+
+# VCS / OS / lokalne
+.git/
+.DS_Store
+.pi/
+.pytest_cache/
+
+# Sekrety i środowiska lokalne
+.env
+venv/
+chroma_db/
+
+# Frontend — wdrażany osobno na Vercel
+frontend/
+node_modules/
+package.json
+package-lock.json
+
+# Streamlit dashboard — nieużywany przez API
+dashboard/
+
+# Dokumentacja i pliki pracy magisterskiej
+docs/
+README.md
+PLAN.md
+
+# Artefakty testów / pakietu
+test_screenshots/
+test-*.mjs
+tests/
+vasculitis_xai.egg-info/
+
+# Kompozycja i dane surowe (do serwowania wystarczą modele)
+docker-compose.yml
+data/raw/
+data/processed/
