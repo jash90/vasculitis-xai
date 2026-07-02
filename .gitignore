@@ -45,10 +45,13 @@ data/raw/*.xlsx
 !data/processed/.gitkeep
 
 # Models
-models/saved/*.joblib
-models/saved/*.pkl
-models/saved/*.h5
+models/saved/**/*.joblib
+models/saved/**/*.pkl
+models/saved/**/*.h5
 !models/saved/.gitkeep
+
+# CatBoost training artifacts
+catboost_info/
 
 # ChromaDB
 chroma_db/
