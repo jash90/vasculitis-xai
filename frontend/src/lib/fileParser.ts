@@ -1,115 +1,112 @@
 import Papa from 'papaparse';
-import { COLUMN_MAPPING, DEFAULT_VALUES } from './columnMapping';
+import { BINARY_COLUMNS, COLUMN_MAPPING, PATIENT_COLUMNS } from './columnMapping';
 import type { PatientInput } from '../api/types';
 
 export interface ParsedPatient extends PatientInput {
   patient_id: string;
 }
 
-function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
-  const normalized: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(row)) {
-    const normalizedKey = key.toLowerCase().trim().replace(/\s+/g, '_');
-    const mappedKey = COLUMN_MAPPING[normalizedKey] ?? normalizedKey;
-    normalized[mappedKey] = value;
-  }
-  return normalized;
+export interface ParseReport {
+  patients: ParsedPatient[];
+  /** Model columns absent from the file (treated as unknown -> training median). */
+  missingColumns: string[];
+  /** File columns that are not used by the model. */
+  ignoredColumns: string[];
+  /** Cells with values that could not be interpreted (treated as unknown). */
+  invalidValues: { row: number; column: string; value: string }[];
 }
 
-function parseBool(value: unknown): number {
-  const s = String(value).toLowerCase();
-  return ['tak', 'yes', 'true', '1', 't', 'y'].includes(s) ? 1 : 0;
+const TRUE_VALUES = new Set(['tak', 'yes', 'true', '1', 't', 'y']);
+const FALSE_VALUES = new Set(['nie', 'no', 'false', '0', 'n', 'f']);
+
+function mapKey(key: string): string {
+  const normalized = key.toLowerCase().trim().replace(/\s+/g, '_');
+  return COLUMN_MAPPING[normalized] ?? normalized;
 }
 
-function toPatient(row: Record<string, unknown>, index: number): ParsedPatient {
-  const get = (key: string): number => {
-    const val = row[key];
-    if (val === undefined || val === null || val === '') {
-      return DEFAULT_VALUES[key] ?? 0;
+function parseRows(rows: Record<string, unknown>[]): ParseReport {
+  const fileColumns = rows.length ? Object.keys(rows[0]) : [];
+  const mapped = new Map(fileColumns.map((c) => [c, mapKey(c)]));
+  const present = new Set(mapped.values());
+  const known = new Set<string>([...PATIENT_COLUMNS, 'patient_id']);
+  const invalidValues: ParseReport['invalidValues'] = [];
+  const usedIds = new Set<string>();
+
+  const patients = rows.map((raw, index) => {
+    const row: Record<string, unknown> = {};
+    for (const [orig, key] of mapped) row[key] = raw[orig];
+
+    const value = (column: string): number | null => {
+      const v = row[column];
+      if (v === undefined || v === null || String(v).trim() === '') return null;
+      if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+      const s = String(v).trim().toLowerCase().replace(',', '.');
+      if (BINARY_COLUMNS.has(column)) {
+        if (TRUE_VALUES.has(s)) return 1;
+        if (FALSE_VALUES.has(s)) return 0;
+      }
+      const n = Number(s);
+      if (Number.isFinite(n)) return n;
+      invalidValues.push({ row: index + 2, column, value: String(v) });
+      return null;
+    };
+
+    const patient = Object.fromEntries(
+      PATIENT_COLUMNS.map((c) => {
+        const v = value(c);
+        if (BINARY_COLUMNS.has(c)) return [c, v === null ? null : v ? 1 : 0];
+        return [c, v];
+      }),
+    ) as unknown as PatientInput;
+
+    if (patient.liczba_zajetych_narzadow === null || patient.liczba_zajetych_narzadow === undefined) {
+      patient.liczba_zajetych_narzadow = PATIENT_COLUMNS.filter(
+        (c) => c.startsWith('manifestacja_') && patient[c as keyof PatientInput] === 1,
+      ).length;
     }
-    const binaryFields = new Set(Object.entries(DEFAULT_VALUES).filter(([, v]) => v === 0 || v === 1).map(([k]) => k));
-    if (binaryFields.has(key) && typeof val === 'string') return parseBool(val);
-    return Number(val) || (DEFAULT_VALUES[key] ?? 0);
-  };
+
+    let id = String(row.patient_id ?? '').trim() || `P${String(index + 1).padStart(4, '0')}`;
+    if (usedIds.has(id)) id = `${id} (${index + 1})`;
+    usedIds.add(id);
+    return { ...patient, patient_id: id };
+  });
 
   return {
-    patient_id: String(row['patient_id'] ?? `P${String(index + 1).padStart(4, '0')}`),
-    wiek_rozpoznania: get('wiek_rozpoznania'),
-    opoznienie_rozpoznia: get('opoznienie_rozpoznia'),
-    manifestacja_miesno_szkiel: get('manifestacja_miesno_szkiel'),
-    manifestacja_skora: get('manifestacja_skora'),
-    manifestacja_wzrok: get('manifestacja_wzrok'),
-    manifestacja_sercowo_naczyniowy: get('manifestacja_sercowo_naczyniowy'),
-    manifestacja_pokarmowy: get('manifestacja_pokarmowy'),
-    manifestacja_nerki: get('manifestacja_nerki'),
-    manifestacja_moczowo_plciowy: get('manifestacja_moczowo_plciowy'),
-    manifestacja_zajecie_csn: get('manifestacja_zajecie_csn'),
-    manifestacja_neurologiczny: get('manifestacja_neurologiczny'),
-    liczba_zajetych_narzadow: get('liczba_zajetych_narzadow'),
-    zaostrz_wymagajace_hospital: get('zaostrz_wymagajace_hospital'),
-    zaostrz_wymagajace_oit: get('zaostrz_wymagajace_oit'),
-    kreatynina: get('kreatynina'),
-    eozynofilia_krwi_obwodowej_wartosc: get('eozynofilia_krwi_obwodowej_wartosc'),
-    pulsy: get('pulsy'),
-    czas_sterydow: get('czas_sterydow'),
-    plazmaferezy: get('plazmaferezy'),
-    biopsja_wynik: get('biopsja_wynik'),
+    patients,
+    missingColumns: PATIENT_COLUMNS.filter((c) => !present.has(c) && c !== 'liczba_zajetych_narzadow'),
+    ignoredColumns: fileColumns.filter((c) => !known.has(mapped.get(c) ?? '')),
+    invalidValues,
   };
 }
 
-export function parseCSV(text: string): ParsedPatient[] {
-  for (const delimiter of [',', ';', '\t', '|']) {
-    const result = Papa.parse<Record<string, unknown>>(text, {
-      header: true,
-      delimiter,
-      skipEmptyLines: true,
-      dynamicTyping: true,
-    });
-    if (result.data.length > 0 && Object.keys(result.data[0]).length > 1) {
-      return result.data.map((row, i) => toPatient(normalizeRow(row), i));
-    }
-  }
-  const result = Papa.parse<Record<string, unknown>>(text, {
+export function parseCSV(text: string): ParseReport {
+  const result = Papa.parse<Record<string, unknown>>(text.replace(/^\uFEFF/, ''), {
     header: true,
     skipEmptyLines: true,
     dynamicTyping: true,
+    delimitersToGuess: [',', ';', '\t', '|'],
   });
-  return result.data.map((row, i) => toPatient(normalizeRow(row), i));
+  return parseRows(result.data);
 }
 
-export function parseJSON(text: string): ParsedPatient[] {
+export function parseJSON(text: string): ParseReport {
   const data = JSON.parse(text);
-  let rows: Record<string, unknown>[];
-
-  if (Array.isArray(data)) {
-    rows = data;
-  } else if (data.patients) {
-    rows = data.patients;
-  } else if (data.data) {
-    rows = data.data;
-  } else {
-    rows = [data];
-  }
-
-  return rows.map((row, i) => toPatient(normalizeRow(row), i));
+  const rows: Record<string, unknown>[] = Array.isArray(data) ? data : data.patients ?? data.data ?? [data];
+  return parseRows(rows);
 }
 
-export function parseFile(file: File): Promise<ParsedPatient[]> {
+export function parseFile(file: File): Promise<ParseReport> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       const text = e.target?.result as string;
       try {
-        if (file.name.toLowerCase().endsWith('.json')) {
-          resolve(parseJSON(text));
-        } else {
-          resolve(parseCSV(text));
-        }
-      } catch (err) {
-        reject(err);
+        resolve(file.name.toLowerCase().endsWith('.json') ? parseJSON(text) : parseCSV(text));
+      } catch {
+        reject(new Error('Nie udało się odczytać pliku — sprawdź, czy ma poprawny format CSV lub JSON.'));
       }
     };
-    reader.onerror = () => reject(new Error('Nie udalo sie odczytac pliku'));
+    reader.onerror = () => reject(new Error('Nie udało się odczytać pliku.'));
     reader.readAsText(file, 'utf-8');
   });
 }

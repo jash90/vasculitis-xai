@@ -1,30 +1,30 @@
-// Mirror of schemas.py — 20 features matching XGBoost model
+// Mirror of schemas.py — 20 features known at diagnosis
 
 export type RiskLevel = 'low' | 'moderate' | 'high';
 export type XAIMethod = 'lime' | 'shap' | 'dalex' | 'ebm';
 export type HealthLiteracyLevel = 'basic' | 'advanced' | 'clinician';
 
 export interface PatientInput {
-  wiek_rozpoznania?: number;
-  opoznienie_rozpoznia?: number;
-  manifestacja_miesno_szkiel: number;
-  manifestacja_skora: number;
-  manifestacja_wzrok: number;
-  manifestacja_sercowo_naczyniowy: number;
-  manifestacja_pokarmowy: number;
-  manifestacja_nerki: number;
-  manifestacja_moczowo_plciowy: number;
-  manifestacja_zajecie_csn: number;
-  manifestacja_neurologiczny: number;
+  wiek_rozpoznania?: number | null;
+  opoznienie_rozpoznia?: number | null;
+  manifestacja_miesno_szkiel: number | null;
+  manifestacja_skora: number | null;
+  manifestacja_wzrok: number | null;
+  manifestacja_sercowo_naczyniowy: number | null;
+  manifestacja_pokarmowy: number | null;
+  manifestacja_nerki: number | null;
+  manifestacja_moczowo_plciowy: number | null;
+  manifestacja_zajecie_csn: number | null;
+  manifestacja_neurologiczny: number | null;
+  manifestacja_oddechowy: number | null;
+  manifestacja_nos_ucho_gardlo: number | null;
   liczba_zajetych_narzadow: number;
-  zaostrz_wymagajace_hospital: number;
-  zaostrz_wymagajace_oit: number;
-  kreatynina?: number;
-  eozynofilia_krwi_obwodowej_wartosc?: number;
-  pulsy: number;
-  czas_sterydow?: number;
-  plazmaferezy: number;
-  biopsja_wynik: number;
+  kreatynina?: number | null;
+  max_crp?: number | null;
+  eozynofilia_krwi_obwodowej_wartosc?: number | null;
+  pulsy: number | null;
+  plazmaferezy: number | null;
+  biopsja_wynik: number | null;
 }
 
 export interface PredictionOutput {
@@ -122,24 +122,28 @@ export interface ChatResponse {
   prediction_data?: ChatPredictionData | null;
 }
 
+export interface AgentFieldMeta {
+  field: string;
+  type: 'number' | 'boolean';
+  widget: 'slider' | 'buttons' | 'input';
+  min?: number;
+  max?: number;
+  step?: number;
+  unit?: string;
+  options?: string[];
+  default?: number;
+  skippable?: boolean;
+}
+
 export interface AgentConversationResponse {
   response: string;
-  collected_data: Record<string, number | string>;
+  collected_data: Record<string, number | string | null>;
   current_step: number;
   phase: 'collecting' | 'prediction' | 'discussion';
   missing_fields: string[];
   prediction_data?: ChatPredictionData | null;
   follow_up_suggestions: string[];
-  field_meta?: {
-    field: string;
-    type: 'number' | 'boolean';
-    widget: 'slider' | 'buttons' | 'input';
-    min?: number;
-    max?: number;
-    step?: number;
-    unit?: string;
-    options?: string[];
-  } | null;
+  field_meta?: AgentFieldMeta | null;
 }
 
 export interface ExplanationRequest {
@@ -233,4 +237,68 @@ export interface BatchResultRow {
   prediction: number;
   top_factors: string;
   processing_mode: string;
+}
+
+export interface SurvivalPoint {
+  time_years: number;
+  survival: number;
+}
+
+export interface SurvivalPrediction {
+  risk_1y: number;
+  risk_3y: number;
+  risk_5y: number;
+  risk_level: RiskLevel;
+  survival_curve: SurvivalPoint[];
+  model: string;
+  metrics: Record<string, number | null>;
+}
+
+export interface MetricWithCi {
+  roc_auc: number;
+  pr_auc: number;
+  brier: number;
+  roc_auc_ci: [number, number];
+  roc_auc_sd?: number;
+  cal_slope?: number;
+}
+
+export interface ClassifierInfo {
+  label: string;
+  calibration: string;
+  cv: MetricWithCi;
+  holdout: MetricWithCi;
+  leave_one_centre_out_auc?: number;
+}
+
+export interface SurvivalModelInfo {
+  model: string;
+  n_train: number;
+  deaths_train: number;
+  median_follow_up_years: number;
+  cv: Record<string, number>;
+  holdout: Record<string, number>;
+}
+
+export interface ModelsMetadata {
+  trained_at: string;
+  task: string;
+  n_patients: number;
+  n_deaths: number;
+  n_train: number;
+  n_holdout: number;
+  feature_names: string[];
+  classifiers: Record<string, ClassifierInfo>;
+  survival?: SurvivalModelInfo;
+  limitations: string[];
+}
+
+export interface ModelInfo {
+  model_type: string;
+  n_features: number;
+  feature_names: string[];
+  training_date: string | null;
+  performance_metrics: Record<string, number>;
+  version: string;
+  details: ModelsMetadata | null;
 }

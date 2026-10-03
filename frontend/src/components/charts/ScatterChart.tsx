@@ -12,10 +12,10 @@ export function AgeRiskScatter({ results }: { results: BatchResultRow[] }) {
       mode: 'markers' as const,
       x: filtered.map((r) => r.wiek_rozpoznania),
       y: filtered.map((r) => r.probability * 100),
-      marker: { size: 10, color: colors[level], opacity: 0.7 },
+      marker: { size: 8, color: colors[level], opacity: 0.7 },
       name: labels[level],
       text: filtered.map((r) => r.patient_id),
-      hovertemplate: '<b>%{text}</b><br>Wiek rozp.: %{x}<br>Ryzyko: %{y:.1f}%<extra></extra>',
+      hovertemplate: '<b>%{text}</b><br>Wiek w chwili rozpoznania: %{x}<br>Ryzyko: %{y:.1f}%<extra></extra>',
     };
   });
 
@@ -23,9 +23,9 @@ export function AgeRiskScatter({ results }: { results: BatchResultRow[] }) {
     <Plot
       data={traces}
       layout={{
-        title: { text: 'Wiek a ryzyko zgonu', font: { size: 18, color: '#ffffff' } },
+        
         xaxis: {
-          title: { text: 'Wiek (lata)', font: { color: '#ffffff' } },
+          title: { text: 'Wiek w chwili rozpoznania (lata)', font: { color: '#ffffff' } },
           tickfont: { color: '#ffffff' },
           gridcolor: '#444444',
         },
@@ -38,7 +38,8 @@ export function AgeRiskScatter({ results }: { results: BatchResultRow[] }) {
         paper_bgcolor: 'rgba(0,0,0,0)',
         plot_bgcolor: 'rgba(0,0,0,0)',
         template: 'plotly_dark' as unknown as undefined,
-        height: 400,
+        height: 380,
+        margin: { l: 60, r: 20, t: 20, b: 50 },
         legend: { font: { color: '#ffffff' } },
       }}
       config={{ displayModeBar: false, responsive: true }}

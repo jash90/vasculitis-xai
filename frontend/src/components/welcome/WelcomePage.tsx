@@ -1,46 +1,35 @@
+import { useModelInfo } from '../../hooks/useApi';
 import { pl } from '../../i18n/pl';
 
-function InfoCard({ title, items }: { title: string; items: readonly string[] }) {
-  return (
-    <div className="rounded-xl border border-gray-700/60 bg-gradient-to-br from-gray-800/60 to-gray-900/60 p-5">
-      <h3 className="mb-3 text-base font-semibold text-blue-300">{title}</h3>
-      <ul className="space-y-1.5 text-sm text-gray-300">
-        {items.map((item) => (
-          <li key={item} className="flex items-start gap-2">
-            <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-400" />
-            {item}
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-export function WelcomePage() {
+export function WelcomePage({ onShowModels }: { onShowModels: () => void }) {
   const w = pl.welcome;
+  const info = useModelInfo().data?.details;
+  const best = info ? Object.values(info.classifiers).map((c) => c.holdout.roc_auc) : [];
+  const c = info?.survival?.holdout.harrell_c;
 
   return (
-    <div className="mx-auto max-w-3xl space-y-8 text-center">
+    <div className="mx-auto max-w-3xl space-y-6 text-center">
       <div>
         <h2 className="mb-2 text-2xl font-bold text-blue-300">{w.title}</h2>
         <p className="text-gray-400">{w.subtitle}</p>
       </div>
-
-      <div className="flex justify-center gap-8">
+      <ul className="grid gap-3 sm:grid-cols-3">
         {w.features.map((f) => (
-          <div key={f.title} className="text-gray-300">
-            <strong className="text-blue-200">{f.title}</strong>
-            <span className="text-gray-500"> — </span>
-            {f.desc}
-          </div>
+          <li key={f.title} className="rounded-xl border border-gray-700/60 bg-gray-800/40 p-4 text-sm">
+            <strong className="block text-blue-200">{f.title}</strong>
+            <span className="text-gray-400">{f.desc}</span>
+          </li>
         ))}
-      </div>
-
-      <div className="grid gap-4 md:grid-cols-3">
-        <InfoCard title={w.models.title} items={w.models.items} />
-        <InfoCard title={w.xai.title} items={w.xai.items} />
-        <InfoCard title={w.metrics.title} items={w.metrics.items} />
-      </div>
+      </ul>
+      {info && (
+        <p className="text-xs text-gray-500">
+          Jakość na odłożonym zbiorze testowym: AUC {Math.min(...best).toFixed(2)}–{Math.max(...best).toFixed(2)}
+          {c !== undefined && <>, model przeżycia C-index {c.toFixed(2)}</>}.{' '}
+          <button type="button" onClick={onShowModels} className="text-blue-400 underline hover:text-blue-300">
+            Szczegóły i ograniczenia
+          </button>
+        </p>
+      )}
     </div>
   );
 }

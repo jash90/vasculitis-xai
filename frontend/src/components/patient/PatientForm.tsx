@@ -1,206 +1,230 @@
-import { useState } from 'react';
-import { usePatientForm } from '../../hooks/usePatientForm';
+import { useId, useState, type ReactNode } from 'react';
+import { useForm, type UseFormRegister, type FieldError } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
 import { pl } from '../../i18n/pl';
 import type { PatientInput } from '../../api/types';
-import type { PatientFormData } from '../../schemas/patient';
+import {
+  MANIFESTATION_FIELDS,
+  emptyPatientValues,
+  examplePatientValues,
+  patientSchema,
+  toPatientInput,
+  type BinaryField,
+  type PatientFormData,
+} from '../../schemas/patient';
 
 interface PatientFormProps {
   onSubmit: (patient: PatientInput) => void;
   isSubmitting: boolean;
+  initialValues?: PatientFormData;
 }
 
 /* ---------- Section (collapsible) ---------- */
-function Section({ title, defaultOpen = false, children }: { title: string; defaultOpen?: boolean; children: React.ReactNode }) {
-  const [open, setOpen] = useState(defaultOpen);
+function Section({ title, children }: { title: string; children: ReactNode }) {
+  const [open, setOpen] = useState(true);
+  const id = useId();
   return (
-    <div className="rounded-lg border border-gray-700/60 bg-gray-800/30">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="flex w-full items-center justify-between px-4 py-3 text-sm font-semibold text-blue-300 transition hover:bg-gray-800/50"
-      >
-        {title}
-        <span className="text-xs text-gray-500">{open ? 'zwiń' : 'rozwiń'}</span>
-      </button>
-      {open && <div className="space-y-4 px-4 pb-4">{children}</div>}
-    </div>
+    <section className="rounded-lg border border-gray-700/60 bg-gray-800/30">
+      <h3>
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+          aria-controls={id}
+          className="flex w-full items-center justify-between rounded-lg px-4 py-3 text-sm font-semibold text-blue-300 transition hover:bg-gray-800/50"
+        >
+          {title}
+          <span aria-hidden className={`text-xs text-gray-500 transition ${open ? 'rotate-180' : ''}`}>▾</span>
+        </button>
+      </h3>
+      <div id={id} hidden={!open} className="space-y-4 px-4 pb-4">
+        {children}
+      </div>
+    </section>
   );
 }
 
 /* ---------- Number input ---------- */
-function NumberField({ label, register, name, min, max, step, unit }: {
+type NumericField = 'wiek_rozpoznania' | 'opoznienie_rozpoznia' | 'kreatynina' | 'max_crp' | 'eozynofilia_krwi_obwodowej_wartosc';
+
+function NumberField({ label, register, name, unit, step, error, placeholder }: {
   label: string;
-  register: ReturnType<typeof usePatientForm>['form']['register'];
-  name: keyof PatientFormData;
-  min?: number;
-  max?: number;
-  step?: number;
+  register: UseFormRegister<PatientFormData>;
+  name: NumericField;
   unit?: string;
+  step?: number;
+  error?: FieldError;
+  placeholder?: string;
 }) {
+  const id = useId();
   return (
-    <label className="block">
-      <span className="mb-1.5 block text-xs font-medium text-gray-400">{label}</span>
-      <div className="relative">
-        <input
-          type="number"
-          {...register(name, { valueAsNumber: true })}
-          min={min}
-          max={max}
-          step={step ?? 1}
-          className="w-full rounded-lg border border-gray-600/80 bg-gray-700/60 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/30"
-        />
-        {unit && (
-          <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-500">
-            {unit}
-          </span>
-        )}
-      </div>
-    </label>
+    <div>
+      <label htmlFor={id} className="mb-1.5 block text-xs font-medium text-gray-400">
+        {label}
+        {unit && <span className="text-gray-500"> ({unit})</span>}
+      </label>
+      <input
+        id={id}
+        type="number"
+        inputMode="decimal"
+        step={step ?? 'any'}
+        placeholder={placeholder ?? 'brak danych'}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? `${id}-err` : undefined}
+        {...register(name, { setValueAs: (v) => (v === '' || v === null ? undefined : Number(v)) })}
+        className={`w-full rounded-lg border bg-gray-700/60 px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 ${
+          error ? 'border-red-500 focus:ring-red-500/40' : 'border-gray-600/80 focus:border-blue-500 focus:ring-blue-500/30'
+        }`}
+      />
+      {error && (
+        <p id={`${id}-err`} className="mt-1 text-xs text-red-400">
+          {error.message}
+        </p>
+      )}
+    </div>
   );
 }
 
-/* ---------- Checkbox with toggle style ---------- */
-function ToggleField({ label, checked, onChange }: {
-  label: string;
-  checked: boolean;
-  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
-}) {
+/* ---------- Toggle (accessible checkbox switch) ---------- */
+function ToggleField({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <label className="flex cursor-pointer items-center justify-between rounded-lg border border-gray-700/40 bg-gray-800/20 px-3 py-2 transition hover:bg-gray-800/40">
+    <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-gray-700/40 bg-gray-800/20 px-3 py-2 transition hover:bg-gray-800/40 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-blue-500">
       <span className="text-sm text-gray-300">{label}</span>
-      <div className="relative">
+      <span className="relative shrink-0">
         <input
           type="checkbox"
+          role="switch"
           checked={checked}
-          onChange={onChange}
+          onChange={(e) => onChange(e.target.checked)}
           className="peer sr-only"
         />
-        <div className="h-5 w-9 rounded-full bg-gray-600 transition peer-checked:bg-blue-600" />
-        <div className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition peer-checked:translate-x-4" />
-      </div>
+        <span aria-hidden className="block h-5 w-9 rounded-full bg-gray-600 transition peer-checked:bg-blue-600" />
+        <span aria-hidden className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition peer-checked:translate-x-4" />
+      </span>
     </label>
   );
 }
 
-/* ---------- Main form ---------- */
-export function PatientForm({ onSubmit, isSubmitting }: PatientFormProps) {
-  const { form, toPatientInput } = usePatientForm();
-  const { register, handleSubmit, setValue, watch } = form;
-  const t = pl.form;
+const ORGANS: [BinaryField, string][] = [
+  ['manifestacja_nerki', pl.form.fields.nerki],
+  ['manifestacja_oddechowy', pl.form.fields.oddechowy],
+  ['manifestacja_nos_ucho_gardlo', pl.form.fields.nos_ucho_gardlo],
+  ['manifestacja_sercowo_naczyniowy', pl.form.fields.serce],
+  ['manifestacja_pokarmowy', pl.form.fields.pokarmowy],
+  ['manifestacja_zajecie_csn', pl.form.fields.csn],
+  ['manifestacja_neurologiczny', pl.form.fields.neuro],
+  ['manifestacja_miesno_szkiel', pl.form.fields.miesno_szkiel],
+  ['manifestacja_skora', pl.form.fields.skora],
+  ['manifestacja_wzrok', pl.form.fields.wzrok],
+  ['manifestacja_moczowo_plciowy', pl.form.fields.moczowo_plciowy],
+];
 
-  const handleCheck = (name: keyof PatientFormData) => (e: React.ChangeEvent<HTMLInputElement>) => {
-    setValue(name, e.target.checked ? 1 : 0);
+/* ---------- Main form ---------- */
+export function PatientForm({ onSubmit, isSubmitting, initialValues }: PatientFormProps) {
+  const form = useForm<PatientFormData>({
+    resolver: zodResolver(patientSchema),
+    defaultValues: initialValues ?? emptyPatientValues,
+    mode: 'onBlur',
+  });
+  const { register, handleSubmit, setValue, getValues, watch, reset, formState } = form;
+  const { errors } = formState;
+  const t = pl.form;
+  const organCountId = useId();
+
+  const setFlag = (name: BinaryField, value: boolean) => {
+    setValue(name, value ? 1 : 0, { shouldDirty: true });
+    if ((MANIFESTATION_FIELDS as readonly string[]).includes(name)) {
+      const count = MANIFESTATION_FIELDS.filter((f) => (f === name ? value : getValues(f) === 1)).length;
+      setValue('liczba_zajetych_narzadow', count, { shouldDirty: true });
+    }
   };
 
   return (
-    <form
-      onSubmit={handleSubmit((data) => onSubmit(toPatientInput(data)))}
-      className="space-y-4"
-    >
-      <h2 className="text-xl font-bold text-blue-300">{pl.sidebar.patientData}</h2>
+    <form onSubmit={handleSubmit((data) => onSubmit(toPatientInput(data)))} className="space-y-4" noValidate>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-bold text-blue-300">{t.title}</h2>
+          <p className="mt-1 text-xs text-gray-500">{t.hint}</p>
+        </div>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => reset(examplePatientValues)}
+            className="rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-700"
+          >
+            {t.example}
+          </button>
+          <button
+            type="button"
+            onClick={() => reset(emptyPatientValues)}
+            className="rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-700"
+          >
+            {t.clear}
+          </button>
+        </div>
+      </div>
 
-      {/* --- Demographics --- */}
-      <Section title={t.sections.demographics} defaultOpen>
-        <div className="grid grid-cols-2 gap-4">
-          <NumberField label={t.fields.wiek_rozpoznania} register={register} name="wiek_rozpoznania" min={0} max={120} unit="lat" />
-          <NumberField label={t.fields.opoznienie_rozpoznia} register={register} name="opoznienie_rozpoznia" min={0} unit="mies." />
+      <Section title={t.sections.demographics}>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <NumberField label={t.fields.wiek_rozpoznania} register={register} name="wiek_rozpoznania" unit="lata" step={1}
+            error={errors.wiek_rozpoznania} placeholder="np. 60" />
+          <NumberField label={t.fields.opoznienie_rozpoznia} register={register} name="opoznienie_rozpoznia" unit="miesiące"
+            step={1} error={errors.opoznienie_rozpoznia} />
         </div>
       </Section>
 
-      {/* --- Organ manifestations --- */}
-      <Section title={t.sections.organs} defaultOpen>
-        <div className="block">
-          <span className="mb-2 block text-xs font-medium text-gray-400">{t.fields.liczba_narzadow}</span>
-          <div className="flex items-center gap-3">
-            <span className="w-4 text-right text-xs text-gray-500">0</span>
-            <input
-              type="range"
-              {...register('liczba_zajetych_narzadow', { valueAsNumber: true })}
-              min={0}
-              max={10}
-              className="flex-1 accent-blue-500"
-            />
-            <span className="w-4 text-xs text-gray-500">10</span>
-            <span className="ml-2 min-w-[2rem] rounded-md bg-gray-700 px-2 py-0.5 text-center text-sm font-bold text-white">
-              {watch('liczba_zajetych_narzadow')}
-            </span>
-          </div>
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          {([
-            ['manifestacja_nerki', t.fields.nerki],
-            ['manifestacja_sercowo_naczyniowy', t.fields.serce],
-            ['manifestacja_zajecie_csn', t.fields.csn],
-            ['manifestacja_neurologiczny', t.fields.neuro],
-            ['manifestacja_pokarmowy', t.fields.pokarmowy],
-            ['manifestacja_miesno_szkiel', t.fields.miesno_szkiel],
-            ['manifestacja_skora', t.fields.skora],
-            ['manifestacja_wzrok', t.fields.wzrok],
-            ['manifestacja_moczowo_plciowy', t.fields.moczowo_plciowy],
-          ] as const).map(([name, label]) => (
-            <ToggleField
-              key={name}
-              label={label}
-              checked={watch(name) === 1}
-              onChange={handleCheck(name)}
-            />
+      <Section title={t.sections.organs}>
+        <div className="grid gap-2 sm:grid-cols-2">
+          {ORGANS.map(([name, label]) => (
+            <ToggleField key={name} label={label} checked={watch(name) === 1} onChange={(v) => setFlag(name, v)} />
           ))}
         </div>
-      </Section>
-
-      {/* --- Disease course --- */}
-      <Section title={t.sections.course} defaultOpen>
-        <div className="grid grid-cols-2 gap-2">
-          <ToggleField
-            label={t.fields.hospital}
-            checked={watch('zaostrz_wymagajace_hospital') === 1}
-            onChange={handleCheck('zaostrz_wymagajace_hospital')}
+        <div>
+          <label htmlFor={organCountId} className="mb-1 block text-xs font-medium text-gray-400">
+            {t.fields.liczba_narzadow}: <strong className="text-white">{watch('liczba_zajetych_narzadow')}</strong>
+          </label>
+          <input
+            id={organCountId}
+            type="range"
+            min={0}
+            max={12}
+            {...register('liczba_zajetych_narzadow', { valueAsNumber: true })}
+            className="w-full accent-blue-500"
           />
-          <ToggleField
-            label={t.fields.oit}
-            checked={watch('zaostrz_wymagajace_oit') === 1}
-            onChange={handleCheck('zaostrz_wymagajace_oit')}
-          />
-        </div>
-        <div className="grid grid-cols-2 gap-4">
-          <NumberField label={t.fields.kreatynina} register={register} name="kreatynina" min={0} step={0.1} unit="μmol/L" />
-          <NumberField label={t.fields.eozynofilia} register={register} name="eozynofilia_krwi_obwodowej_wartosc" min={0} step={0.1} />
+          <p className="mt-1 text-xs text-gray-500">{t.fields.liczba_narzadow_hint}</p>
         </div>
       </Section>
 
-      {/* --- Treatment --- */}
-      <Section title={t.sections.treatment} defaultOpen>
-        <div className="grid grid-cols-2 gap-2">
-          <ToggleField
-            label={t.fields.pulsy}
-            checked={watch('pulsy') === 1}
-            onChange={handleCheck('pulsy')}
-          />
-          <ToggleField
-            label={t.fields.plazmaferezy}
-            checked={watch('plazmaferezy') === 1}
-            onChange={handleCheck('plazmaferezy')}
-          />
+      <Section title={t.sections.labs}>
+        <div className="grid gap-4 sm:grid-cols-3">
+          <NumberField label={t.fields.kreatynina} register={register} name="kreatynina" unit="μmol/L" error={errors.kreatynina} />
+          <NumberField label={t.fields.max_crp} register={register} name="max_crp" unit="mg/L" error={errors.max_crp} />
+          <NumberField label={t.fields.eozynofilia} register={register} name="eozynofilia_krwi_obwodowej_wartosc" unit="/μL"
+            step={1} error={errors.eozynofilia_krwi_obwodowej_wartosc} />
         </div>
-        <NumberField label={t.fields.czas_sterydow} register={register} name="czas_sterydow" min={0} unit="mies." />
       </Section>
 
-      {/* --- Diagnostics --- */}
-      <Section title={t.sections.diagnostics} defaultOpen>
-        <ToggleField
-          label={t.fields.biopsja}
-          checked={watch('biopsja_wynik') === 1}
-          onChange={handleCheck('biopsja_wynik')}
-        />
+      <Section title={t.sections.treatment}>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <ToggleField label={t.fields.pulsy} checked={watch('pulsy') === 1} onChange={(v) => setFlag('pulsy', v)} />
+          <ToggleField label={t.fields.plazmaferezy} checked={watch('plazmaferezy') === 1} onChange={(v) => setFlag('plazmaferezy', v)} />
+        </div>
       </Section>
 
-      {/* --- Submit --- */}
+      <Section title={t.sections.diagnostics}>
+        <ToggleField label={t.fields.biopsja} checked={watch('biopsja_wynik') === 1} onChange={(v) => setFlag('biopsja_wynik', v)} />
+      </Section>
+
+      {Object.keys(errors).length > 0 && (
+        <p role="alert" className="text-sm text-red-400">Popraw zaznaczone pola, aby kontynuować.</p>
+      )}
+
       <button
         type="submit"
         disabled={isSubmitting}
-        className="w-full rounded-xl bg-blue-600 py-3 text-sm font-bold text-white shadow-lg shadow-blue-600/20 transition hover:bg-blue-700 hover:shadow-blue-600/30 disabled:opacity-50"
+        className="w-full rounded-xl bg-blue-600 py-3 text-sm font-bold text-white shadow-lg shadow-blue-600/20 transition hover:bg-blue-700 disabled:opacity-50"
       >
-        {isSubmitting ? 'Analizuję...' : pl.sidebar.analyze}
+        {isSubmitting ? t.analyzing : t.analyze}
       </button>
     </form>
   );

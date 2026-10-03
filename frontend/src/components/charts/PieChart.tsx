@@ -7,9 +7,14 @@ export function RiskPieChart({ results }: { results: BatchResultRow[] }) {
     if (r.risk_level in counts) counts[r.risk_level as keyof typeof counts]++;
   });
 
-  const labels = ['Niskie', 'Umiarkowane', 'Wysokie'];
-  const values = [counts.low, counts.moderate, counts.high];
-  const colors = ['#28a745', '#ffc107', '#dc3545'];
+  const all = [
+    { label: 'Niskie', value: counts.low, color: '#22c55e' },
+    { label: 'Umiarkowane', value: counts.moderate, color: '#eab308' },
+    { label: 'Wysokie', value: counts.high, color: '#ef4444' },
+  ].filter((c) => c.value > 0);
+  const labels = all.map((c) => c.label);
+  const values = all.map((c) => c.value);
+  const colors = all.map((c) => c.color);
 
   return (
     <Plot
@@ -20,7 +25,8 @@ export function RiskPieChart({ results }: { results: BatchResultRow[] }) {
           values,
           marker: { colors },
           hole: 0.4,
-          textinfo: 'label+percent+value',
+          textinfo: 'percent',
+          hovertemplate: '%{label}: %{value} (%{percent})<extra></extra>',
           textfont: { size: 14, color: 'white' },
         },
       ]}

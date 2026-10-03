@@ -1,114 +1,107 @@
 import { useState, useCallback } from 'react';
-import type { PatientInput, BatchResultRow, RiskLevel } from '../api/types';
-import { parseFile } from '../lib/fileParser';
+import type { BatchResultRow, PatientInput } from '../api/types';
+import { parseFile, type ParseReport, type ParsedPatient } from '../lib/fileParser';
 import { predictBatch } from '../api/endpoints';
-import { getDemoPrediction, getDemoExplanation } from '../lib/demo';
 import { RISK_LEVEL_PL } from '../lib/columnMapping';
+import { featureLabel } from '../lib/featureLabels';
+import { errorMessage } from '../lib/errors';
+
+const CHUNK_SIZE = 1000;
+
+function withoutId(p: ParsedPatient): PatientInput {
+  const copy: Partial<ParsedPatient> = { ...p };
+  delete copy.patient_id;
+  return copy as PatientInput;
+}
 
 export function useBatchAnalysis() {
   const [results, setResults] = useState<BatchResultRow[] | null>(null);
+  const [report, setReport] = useState<Omit<ParseReport, 'patients'> | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [fileName, setFileName] = useState<string>('');
-  const [mode, setMode] = useState<string>('');
+  const [fileName, setFileName] = useState('');
+  const [mode, setMode] = useState('');
+  const [pending, setPending] = useState<ParsedPatient[] | null>(null);
 
-  const processFile = useCallback(async (file: File) => {
+  const run = useCallback(async (patients: ParsedPatient[]) => {
     setIsProcessing(true);
     setProgress(0);
     setError(null);
-    setFileName(file.name);
-
+    const rows: BatchResultRow[] = [];
     try {
-      const patients = await parseFile(file);
-      if (patients.length === 0) {
-        setError('Plik jest pusty');
-        setIsProcessing(false);
-        return;
-      }
-
-      // Try batch API first
-      const patientInputs: PatientInput[] = patients.map(({ patient_id: _, ...rest }) => rest);
-      const CHUNK_SIZE = 1000;
-      const allResults: BatchResultRow[] = [];
-
-      let apiSuccess = false;
-
-      for (let i = 0; i < patientInputs.length; i += CHUNK_SIZE) {
-        const chunk = patientInputs.slice(i, i + CHUNK_SIZE);
-        const chunkPatients = patients.slice(i, i + CHUNK_SIZE);
-
-        try {
-          const batchResult = await predictBatch({
-            patients: chunk,
-            include_risk_factors: true,
-            top_n_factors: 3,
+      for (let i = 0; i < patients.length; i += CHUNK_SIZE) {
+        const chunk = patients.slice(i, i + CHUNK_SIZE);
+        const res = await predictBatch({
+          patients: chunk.map(withoutId),
+          include_risk_factors: true,
+          top_n_factors: 3,
+        });
+        setMode(res.mode);
+        res.results.forEach((item, j) => {
+          const p = chunk[j];
+          rows.push({
+            patient_id: p.patient_id,
+            wiek_rozpoznania: p.wiek_rozpoznania ?? NaN,
+            liczba_narzadow: p.liczba_zajetych_narzadow,
+            probability: item.prediction.probability,
+            probability_pct: `${(item.prediction.probability * 100).toFixed(1)}%`,
+            risk_level: item.prediction.risk_level,
+            risk_level_pl: RISK_LEVEL_PL[item.prediction.risk_level] ?? '',
+            prediction: item.prediction.prediction,
+            top_factors: (item.top_risk_factors ?? [])
+              .map((f) => `${featureLabel(f.feature)} ${f.direction === 'increases_risk' ? '↑' : '↓'}`)
+              .join(', '),
+            processing_mode: res.mode,
           });
-
-          apiSuccess = true;
-          setMode(batchResult.mode);
-
-          for (let j = 0; j < batchResult.results.length; j++) {
-            const item = batchResult.results[j];
-            const pred = item.prediction;
-            const topFactors = item.top_risk_factors?.map((f) => f.feature).slice(0, 3).join(', ') ?? '';
-
-            allResults.push({
-              patient_id: chunkPatients[j].patient_id,
-              wiek_rozpoznania: chunk[j].wiek_rozpoznania ?? 0,
-              liczba_narzadow: chunk[j].liczba_zajetych_narzadow,
-              probability: pred.probability,
-              probability_pct: `${(pred.probability * 100).toFixed(1)}%`,
-              risk_level: pred.risk_level,
-              risk_level_pl: RISK_LEVEL_PL[pred.risk_level] ?? 'Niskie',
-              prediction: pred.prediction,
-              top_factors: topFactors,
-              processing_mode: batchResult.mode,
-            });
-          }
-        } catch {
-          // Fallback to demo mode
-          for (let j = 0; j < chunk.length; j++) {
-            const prediction = getDemoPrediction(chunk[j]);
-            const explanation = getDemoExplanation(chunk[j]);
-            const allFactors = [...explanation.risk_factors, ...explanation.protective_factors]
-              .sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
-
-            allResults.push({
-              patient_id: chunkPatients[j].patient_id,
-              wiek_rozpoznania: chunk[j].wiek_rozpoznania ?? 0,
-              liczba_narzadow: chunk[j].liczba_zajetych_narzadow,
-              probability: prediction.probability,
-              probability_pct: `${(prediction.probability * 100).toFixed(1)}%`,
-              risk_level: prediction.risk_level as RiskLevel,
-              risk_level_pl: RISK_LEVEL_PL[prediction.risk_level] ?? 'Niskie',
-              prediction: prediction.prediction,
-              top_factors: allFactors.slice(0, 3).map((f) => f.feature).join(', '),
-              processing_mode: 'demo',
-            });
-          }
-          if (!apiSuccess) setMode('demo');
-        }
-
-        setProgress((i + chunk.length) / patientInputs.length);
+        });
+        setProgress(Math.min(1, (i + chunk.length) / patients.length));
       }
-
-      setProgress(1);
-      setResults(allResults);
+      setResults(rows);
+      setPending(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Błąd przetwarzania pliku');
+      // No silent fallback to fake predictions: show the error and allow a retry.
+      setError(`Analiza przerwana po ${rows.length} z ${patients.length} pacjentów. ${errorMessage(err)}`);
+      setPending(patients);
     } finally {
       setIsProcessing(false);
     }
   }, []);
 
+  const processFile = useCallback(
+    async (file: File) => {
+      setFileName(file.name);
+      setResults(null);
+      setError(null);
+      try {
+        const parsed = await parseFile(file);
+        const { patients, ...rest } = parsed;
+        setReport(rest);
+        if (!patients.length) {
+          setError('Plik nie zawiera żadnych pacjentów.');
+          return;
+        }
+        await run(patients);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Błąd przetwarzania pliku.');
+      }
+    },
+    [run],
+  );
+
+  const retry = useCallback(() => {
+    if (pending) void run(pending);
+  }, [pending, run]);
+
   const reset = useCallback(() => {
     setResults(null);
+    setReport(null);
     setProgress(0);
     setError(null);
     setFileName('');
     setMode('');
+    setPending(null);
   }, []);
 
-  return { results, isProcessing, progress, error, fileName, mode, processFile, reset };
+  return { results, report, isProcessing, progress, error, fileName, mode, canRetry: pending !== null, processFile, retry, reset };
 }

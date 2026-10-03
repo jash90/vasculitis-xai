@@ -2,19 +2,13 @@ import { useDemoMode } from '../../hooks/useApi';
 
 export function DemoModeIndicator() {
   const { data, isError } = useDemoMode();
-
-  const mode = isError ? 'unavailable' : data?.current_mode ?? 'unknown';
-
-  if (mode === 'api') return null;
-
-  const label = mode === 'demo' ? 'DEMO' : mode === 'unavailable' ? 'API niedostępne' : '';
-  const color = mode === 'demo' ? 'bg-yellow-600' : 'bg-red-600';
-
-  if (!label) return null;
-
+  const mode = isError ? 'unavailable' : data?.current_mode;
+  if (!mode || mode === 'api') return null;
+  const isDemo = mode === 'demo';
   return (
-    <div className="mt-1 flex justify-center">
-      <span className={`rounded-full px-3 py-0.5 text-xs font-bold text-white ${color}`}>{label}</span>
-    </div>
+    <span role="status" title={isDemo ? 'Model nie jest załadowany — wyniki są poglądowe' : 'Brak połączenia z serwerem API'}
+      className={`rounded-full px-3 py-0.5 text-xs font-bold text-white ${isDemo ? 'bg-yellow-600' : 'bg-red-600'}`}>
+      {isDemo ? 'Tryb demonstracyjny' : 'API niedostępne'}
+    </span>
   );
 }

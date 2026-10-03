@@ -1,7 +1,6 @@
 import apiClient from './client';
 import type {
   PatientInput,
-  PredictionOutput,
   ExplanationRequest,
   SHAPExplanation,
   LIMEExplanation,
@@ -13,15 +12,11 @@ import type {
   BatchPatientInput,
   BatchPredictionOutput,
   DemoModeStatus,
-  HealthCheckResponse,
   AgentConversationResponse,
   MultiModelPredictionOutput,
+  SurvivalPrediction,
+  ModelInfo,
 } from './types';
-
-export async function predict(patient: PatientInput): Promise<PredictionOutput> {
-  const { data } = await apiClient.post<PredictionOutput>('/predict', patient);
-  return data;
-}
 
 export async function predictAll(patient: PatientInput): Promise<MultiModelPredictionOutput> {
   const { data } = await apiClient.post<MultiModelPredictionOutput>('/predict/all', patient);
@@ -70,15 +65,20 @@ export async function getDemoMode(): Promise<DemoModeStatus> {
   return data;
 }
 
-export async function getHealth(): Promise<HealthCheckResponse> {
-  const { data } = await apiClient.get<HealthCheckResponse>('/health');
+export async function predictSurvival(patient: PatientInput): Promise<SurvivalPrediction> {
+  const { data } = await apiClient.post<SurvivalPrediction>('/predict/survival', patient);
+  return data;
+}
+
+export async function getModelInfo(): Promise<ModelInfo> {
+  const { data } = await apiClient.get<ModelInfo>('/model/info');
   return data;
 }
 
 export interface AgentChatPayload {
   message: string;
   conversation_history: Array<{ role: string; content: string }>;
-  collected_data: Record<string, number | string>;
+  collected_data: Record<string, number | string | null>;
   current_step: number;
   phase: 'collecting' | 'prediction' | 'discussion';
 }

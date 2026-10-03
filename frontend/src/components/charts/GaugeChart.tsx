@@ -1,51 +1,39 @@
 import Plot from './Plot';
+import { DARK_LAYOUT, PLOT_CONFIG } from './chartTheme';
 
 interface GaugeChartProps {
   probability: number;
   title?: string;
+  height?: number;
 }
 
-export function GaugeChart({ probability, title = 'Ryzyko' }: GaugeChartProps) {
-  const color = probability < 0.3 ? '#28a745' : probability < 0.7 ? '#ffc107' : '#dc3545';
-
+/** Risk gauge; bands match the API thresholds (30% / 70%). */
+export function GaugeChart({ probability, title = '', height = 220 }: GaugeChartProps) {
+  const color = probability < 0.3 ? '#22c55e' : probability < 0.7 ? '#eab308' : '#ef4444';
   return (
     <Plot
       data={[
         {
           type: 'indicator',
           mode: 'gauge+number',
-          value: probability * 100,
-          domain: { x: [0, 1], y: [0, 1] },
-          title: { text: title, font: { size: 20, color: '#ffffff' } },
-          number: { suffix: '%', font: { size: 40, color: '#ffffff' } },
+          value: Math.round(probability * 1000) / 10,
+          title: title ? { text: title, font: { size: 14 } } : undefined,
+          number: { suffix: '%', font: { size: 34, color: '#ffffff' } },
           gauge: {
-            axis: { range: [0, 100], tickwidth: 1, tickcolor: '#ffffff', tickfont: { color: '#ffffff' } },
-            bar: { color },
-            bgcolor: '#2d2d2d',
-            borderwidth: 2,
-            bordercolor: '#555555',
+            axis: { range: [0, 100], tickvals: [0, 30, 70, 100], tickfont: { color: '#d1d5db', size: 11 } },
+            bar: { color, thickness: 0.3 },
+            bgcolor: '#1f2937',
+            borderwidth: 0,
             steps: [
-              { range: [0, 30], color: '#1e4620' },
-              { range: [30, 70], color: '#5c4a1e' },
-              { range: [70, 100], color: '#5c1e1e' },
+              { range: [0, 30], color: 'rgba(34,197,94,0.18)' },
+              { range: [30, 70], color: 'rgba(234,179,8,0.18)' },
+              { range: [70, 100], color: 'rgba(239,68,68,0.18)' },
             ],
-            threshold: {
-              line: { color: '#ffffff', width: 4 },
-              thickness: 0.75,
-              value: probability * 100,
-            },
           },
         },
       ]}
-      layout={{
-        height: 300,
-        margin: { l: 20, r: 20, t: 50, b: 20 },
-        font: { color: '#ffffff', size: 14 },
-        paper_bgcolor: 'rgba(0,0,0,0)',
-        plot_bgcolor: 'rgba(0,0,0,0)',
-        template: 'plotly_dark' as unknown as undefined,
-      }}
-      config={{ displayModeBar: false, responsive: true }}
+      layout={{ ...DARK_LAYOUT, height, margin: { l: 30, r: 30, t: title ? 40 : 20, b: 10 } }}
+      config={PLOT_CONFIG}
       useResizeHandler
       className="w-full"
     />

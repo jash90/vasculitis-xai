@@ -19,13 +19,15 @@ const LABELS: Record<RiskLevel, string> = {
   high: pl.risk.high,
 };
 
-export function RiskBadge({ level }: { level: RiskLevel }) {
+export function RiskBadge({ level, compact = false }: { level: RiskLevel; compact?: boolean }) {
   const s = STYLES[level];
+  if (compact) {
+    return <span className={`rounded-md border-l-4 px-3 py-1 text-sm font-semibold ${s.bg} ${s.border} ${s.text}`}>{LABELS[level]}</span>;
+  }
   return (
-    <div className={`rounded-lg border-l-4 p-4 ${s.bg} ${s.border}`}>
+    <div className={`rounded-lg border-l-4 px-4 py-2 text-left ${s.bg} ${s.border}`}>
       <strong className={s.text}>{LABELS[level]}</strong>
-      <br />
-      <span className="text-sm text-gray-300">{DESCS[level]}</span>
+      <p className="text-xs text-gray-300">{DESCS[level]}</p>
     </div>
   );
 }
