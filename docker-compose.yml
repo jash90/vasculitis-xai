@@ -1,7 +1,20 @@
-version: '3.8'
+# Orkiestracja całego systemu Vasculitis XAI.
+#
+# Uruchomienie (backend + frontend):
+#   docker compose up --build
+# Z opcjonalną bazą wektorową dla RAG:
+#   docker compose --profile rag up --build
+#
+# Po starcie:
+#   Frontend (React):     http://localhost:8080
+#   API (Swagger UI):     http://localhost:8000/docs
+#   Health check:         http://localhost:8000/health
+#
+# Klucz OpenAI (opcjonalny — bez niego asystent działa w trybie offline/fallback):
+#   utwórz plik .env z wpisem OPENAI_API_KEY=...
 
 services:
-  # API FastAPI
+  # Backend FastAPI: walidacja, predykcja, endpointy XAI i agent konwersacyjny.
   api:
     build:
       context: .
@@ -10,9 +23,15 @@ services:
     ports:
       - "8000:8000"
     environment:
+      # Domyślny artefakt to skalibrowany model dopasowany do kontraktu 20 cech.
       - MODEL_PATH=/app/models/saved/best_model.joblib
       - FEATURE_NAMES_PATH=/app/models/saved/feature_names.json
+      # Asystent LLM (patrz rozdz. 4.4). Bez klucza -> tryb offline/fallback.
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4}
+      # Gdy artefakt modelu jest niezgodny z kontraktem, API łagodnie
+      # przechodzi w tryb demonstracyjny zamiast zwracać błąd.
+      - ALLOW_DEMO=${ALLOW_DEMO:-true}
       - LOG_LEVEL=INFO
     volumes:
       - ./models:/app/models:ro
@@ -22,15 +41,32 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 15s
     restart: unless-stopped
     networks:
       - vasculitis-network
 
-  # ChromaDB dla RAG (opcjonalnie)
+  # Frontend React/Vite: build statyczny serwowany przez nginx, który
+  # proxuje wywołania REST (/predict, /explain, /chat, /agent ...) do api:8000.
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: vasculitis-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - vasculitis-network
+
+  # Baza wektorowa ChromaDB dla RAG (opcjonalna — profil "rag").
   chroma:
     image: chromadb/chroma:latest
     container_name: vasculitis-chroma
+    profiles: ["rag"]
     ports:
       - "8001:8000"
     volumes:

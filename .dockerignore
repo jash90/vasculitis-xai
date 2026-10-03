@@ -1,0 +1,2 @@
+# local model backups are not part of the image
+models/_backup_*/
