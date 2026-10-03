@@ -4,6 +4,12 @@ AUC-first offline training utilities.
 This path is intentionally separate from the 20-feature API model. It uses the
 full clinical table for model comparison while keeping preprocessing artifacts
 and feature order attached to the saved models.
+
+With ``registry_recoding=True`` (used by scripts/train_auc_models.py) the raw
+registry is recoded by ``src.data.cohort`` (code 0 / -1 / 3 = missing,
+1/2 = yes/no) and restricted to features known at diagnosis
+(``src.data.feature_sets``). The best model is chosen by cross-validated AUC on
+the training split; the test split is only reported.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from scipy.special import expit
+from sklearn.base import clone
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier, StackingClassifier
 from sklearn.feature_selection import SelectKBest, mutual_info_classif
 from sklearn.impute import SimpleImputer
@@ -32,7 +39,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
@@ -41,6 +48,7 @@ from sklearn.svm import SVC
 DEFAULT_TARGET = "Zgon"
 DEFAULT_ID_COLUMNS = ("Kod", "ID", "id", "Patient_ID")
 DEFAULT_N_FEATURES = 71
+INPUT_CODING_RECODED = "registry_recoded_v2"
 
 
 @dataclass
@@ -93,6 +101,8 @@ def prepare_auc_train_test(
     test_size: float = 0.2,
     random_state: int = 42,
     correlation_threshold: Optional[float] = 0.95,
+    registry_recoding: bool = False,
+    feature_task: str = "mortality",
 ) -> AUCPreparedData:
     """
     Build a leakage-safe train/test matrix for offline AUC optimisation.
@@ -101,19 +111,30 @@ def prepare_auc_train_test(
     columns are removed before any feature scoring to prevent patient-code leakage.
     """
 
-    df = _normalise_columns(pd.read_csv(data_path, sep="|"))
-    if target_col not in df.columns:
-        raise ValueError(f"Missing target column: {target_col}")
+    if registry_recoding:
+        from src.data.cohort import ID_COLUMN, load_cohort
+        from src.data.feature_sets import baseline_features
 
-    y = pd.to_numeric(df[target_col], errors="coerce")
-    X = df.drop(columns=[target_col])
+        data = load_cohort(data_path).data
+        if target_col not in data.columns:
+            raise ValueError(f"Missing target column: {target_col}")
+        y = data[target_col]
+        X = data[baseline_features(data.columns, feature_task)]
+        dropped_identifier_columns = [ID_COLUMN]
+    else:
+        df = _normalise_columns(pd.read_csv(data_path, sep="|"))
+        if target_col not in df.columns:
+            raise ValueError(f"Missing target column: {target_col}")
 
-    id_set = set(id_columns)
-    dropped_identifier_columns = [column for column in X.columns if column in id_set]
-    if dropped_identifier_columns:
-        X = X.drop(columns=dropped_identifier_columns)
+        y = pd.to_numeric(df[target_col], errors="coerce")
+        X = df.drop(columns=[target_col])
 
-    X = X.apply(pd.to_numeric, errors="coerce").replace(-1, np.nan)
+        id_set = set(id_columns)
+        dropped_identifier_columns = [column for column in X.columns if column in id_set]
+        if dropped_identifier_columns:
+            X = X.drop(columns=dropped_identifier_columns)
+
+        X = X.apply(pd.to_numeric, errors="coerce").replace(-1, np.nan)
 
     keep_mask = y.notna()
     X = X.loc[keep_mask]
@@ -182,19 +203,26 @@ def build_auc_model_specs(
     random_state: int = 42,
     scale_pos_weight: Optional[float] = None,
     include_stacking: bool = True,
+    param_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Create fresh model instances tuned for the full-feature AUC path."""
+    """Create fresh model instances for the AUC path.
+
+    Defaults are moderate, regularised settings suited to N~900. The previous
+    hard-coded "tuned" values had no recorded tuning run (possibly tuned on all
+    rows, test split included), so they were replaced. Tuned values can be passed
+    via ``param_overrides`` ({model_key: {param: value}}), e.g. from an Optuna
+    run on the training split only.
+    """
 
     CatBoostClassifier, LGBMClassifier, XGBClassifier = _require_optional_estimators()
     scale_pos_weight = 1.0 if scale_pos_weight is None else float(scale_pos_weight)
 
     specs: Dict[str, Any] = {
         "catboost": CatBoostClassifier(
-            iterations=406,
-            depth=6,
-            learning_rate=0.02092927267979338,
-            l2_leaf_reg=7.67539109585377,
-            border_count=162,
+            iterations=500,
+            depth=4,
+            learning_rate=0.03,
+            l2_leaf_reg=5.0,
             loss_function="Logloss",
             eval_metric="AUC",
             auto_class_weights="Balanced",
@@ -203,7 +231,7 @@ def build_auc_model_specs(
             verbose=False,
         ),
         "svm": SVC(
-            C=0.7055565297792288,
+            C=1.0,
             kernel="rbf",
             gamma="scale",
             class_weight="balanced",
@@ -211,63 +239,66 @@ def build_auc_model_specs(
             random_state=random_state,
         ),
         "random_forest": RandomForestClassifier(
-            n_estimators=200,
-            max_depth=10,
-            min_samples_split=20,
-            class_weight="balanced",
+            n_estimators=500,
+            min_samples_leaf=5,
+            max_features="sqrt",
+            class_weight="balanced_subsample",
             n_jobs=-1,
             random_state=random_state,
         ),
         "lightgbm": LGBMClassifier(
-            n_estimators=400,
-            learning_rate=0.014950816445843533,
-            max_depth=3,
-            num_leaves=54,
-            min_child_samples=14,
-            subsample=0.790544421197768,
-            colsample_bytree=0.40646279954556636,
-            reg_alpha=0.08687200661323258,
-            reg_lambda=4.360324378447307e-06,
+            n_estimators=300,
+            learning_rate=0.03,
+            num_leaves=15,
+            min_child_samples=20,
+            subsample=0.8,
+            subsample_freq=1,
+            colsample_bytree=0.7,
+            reg_lambda=5.0,
             is_unbalance=True,
             random_state=random_state,
             verbose=-1,
         ),
         "xgboost": XGBClassifier(
-            n_estimators=200,
-            max_depth=6,
-            learning_rate=0.006279196181558339,
-            min_child_weight=7,
-            gamma=0.07693125296022804,
+            n_estimators=300,
+            max_depth=3,
+            learning_rate=0.03,
+            min_child_weight=5,
             subsample=0.8,
-            colsample_bytree=0.5846252903648841,
+            colsample_bytree=0.7,
+            reg_lambda=5.0,
             scale_pos_weight=scale_pos_weight,
             eval_metric="auc",
             random_state=random_state,
             n_jobs=2,
         ),
         "gradient_boosting": GradientBoostingClassifier(
-            n_estimators=400,
-            learning_rate=0.01702840441422188,
-            max_depth=4,
-            min_samples_split=6,
-            min_samples_leaf=5,
-            subsample=0.5586520980125771,
+            n_estimators=300,
+            learning_rate=0.03,
+            max_depth=3,
+            min_samples_leaf=10,
+            subsample=0.8,
             random_state=random_state,
         ),
         "logistic_regression": LogisticRegression(
+            C=0.1,
             class_weight="balanced",
             max_iter=1000,
             random_state=random_state,
         ),
         "neural_network": MLPClassifier(
             hidden_layer_sizes=(100, 50),
-            alpha=0.001,
+            alpha=0.01,
             learning_rate="adaptive",
             max_iter=1000,
             early_stopping=True,
             random_state=random_state,
         ),
     }
+
+    for key, overrides in (param_overrides or {}).items():
+        if key in specs and overrides:
+            specs[key].set_params(**overrides)
 
     if include_stacking:
         specs["stacking"] = StackingClassifier(
@@ -343,13 +374,17 @@ def train_auc_models(
     n_features: int = DEFAULT_N_FEATURES,
     random_state: int = 42,
     include_stacking: bool = True,
+    registry_recoding: bool = False,
+    param_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
+    cv_folds: int = 5,
 ) -> Dict[str, Any]:
-    """Train full-feature models, evaluate them, and persist comparison artifacts."""
+    """Train models, select the best by CV AUC on the training split, report test metrics."""
 
     prepared = prepare_auc_train_test(
         data_path,
-        n_features=n_features,
+        n_features=None if n_features is None or n_features <= 0 else n_features,
         random_state=random_state,
+        registry_recoding=registry_recoding,
     )
     negatives = int(np.sum(prepared.y_train == 0))
     positives = int(np.sum(prepared.y_train == 1))
@@ -359,6 +394,7 @@ def train_auc_models(
         random_state=random_state,
         scale_pos_weight=scale_pos_weight,
         include_stacking=include_stacking,
+        param_overrides=param_overrides,
     )
     selected_keys = list(model_keys) if model_keys is not None else list(specs.keys())
 
@@ -367,19 +403,26 @@ def train_auc_models(
 
     models: Dict[str, Any] = {}
     metrics: Dict[str, Dict[str, float]] = {}
+    cv = StratifiedKFold(cv_folds, shuffle=True, random_state=random_state)
 
     for key in selected_keys:
         if key not in specs:
             raise ValueError(f"Unknown model key: {key}. Available: {sorted(specs)}")
         model = specs[key]
+        # Model selection uses the training split only (CV); the test split is reported.
+        cv_scores = cross_val_score(clone(model), prepared.X_train, prepared.y_train, cv=cv, scoring="roc_auc")
         model.fit(prepared.X_train, prepared.y_train)
         models[key] = model
-        metrics[key] = evaluate_binary_classifier(model, prepared.X_test, prepared.y_test)
+        metrics[key] = {
+            "cv_auc_train": float(cv_scores.mean()),
+            "cv_auc_train_sd": float(cv_scores.std(ddof=1)),
+            **evaluate_binary_classifier(model, prepared.X_test, prepared.y_test),
+        }
         joblib.dump(model, output_path / f"{key}_model.joblib")
 
     comparison = [
         {"model": key, **values}
-        for key, values in sorted(metrics.items(), key=lambda item: item[1]["auc"], reverse=True)
+        for key, values in sorted(metrics.items(), key=lambda item: item[1]["cv_auc_train"], reverse=True)
     ]
     best_key = comparison[0]["model"]
 
@@ -404,6 +447,9 @@ def train_auc_models(
         "train_positive": positives,
         "train_negative": negatives,
         "random_state": random_state,
+        "best_model_selected_by": "cv_auc_train",
+        "input_coding": INPUT_CODING_RECODED if registry_recoding else "raw_minus1_as_missing",
+        "feature_set": "at_diagnosis" if registry_recoding else "all_columns",
     }
 
     (output_path / "feature_names_auc.json").write_text(

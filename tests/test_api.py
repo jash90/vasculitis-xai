@@ -23,7 +23,7 @@ class TestSchemas:
             wiek_rozpoznania=50,
             liczba_zajetych_narzadow=3,
             manifestacja_nerki=1,
-            zaostrz_wymagajace_oit=0,
+            manifestacja_oddechowy=0,
             kreatynina=100.0,
             eozynofilia_krwi_obwodowej_wartosc=0.5
         )
@@ -105,6 +105,22 @@ class TestSchemas:
         assert arr[1] == 1   # Manifestacja_Nerki
         assert arr[2] == 100.0  # Kreatynina
         assert arr[3] == 1   # Plazmaferezy
+
+    def test_patient_to_array_unknown_values_use_training_defaults(self, monkeypatch):
+        """None / zero lab values are treated as missing and replaced by training medians."""
+        import src.api.schemas as schemas
+
+        monkeypatch.setattr(schemas, "load_feature_defaults",
+                            lambda: {"Kreatynina": 140.0, "Max_CRP": 30.0, "Manifestacja_Oddechowy": 1.0})
+        patient = PatientInput(wiek_rozpoznania=60, kreatynina=0, max_crp=None)
+        arr = patient_to_array(patient, ["Kreatynina", "Max_CRP", "Manifestacja_Oddechowy", "Wiek_rozpoznania"])
+        assert arr == [140.0, 30.0, 0, 60]
+
+    def test_follow_up_fields_are_not_model_inputs(self):
+        """Old clients may still send follow-up fields; they are ignored."""
+        patient = PatientInput(wiek_rozpoznania=50, zaostrz_wymagajace_oit=1, czas_sterydow=12)
+        assert not hasattr(patient, "zaostrz_wymagajace_oit")
+        assert "czas_sterydow" not in patient.model_dump()
 
     def test_health_literacy_levels(self):
         """Test poziomów health literacy."""

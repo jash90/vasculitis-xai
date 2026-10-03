@@ -244,6 +244,8 @@ FEATURE_TRANSLATIONS = {
     'Manifestacja_Neurologiczny': 'Objawy neurologiczne',
     'Zaostrz_Wymagajace_OIT': 'Historia pobytu na intensywnej terapii',
     'Kreatynina': 'Poziom wskaźnika czynności nerek',
+    'Manifestacja_Oddechowy': 'Stan układu oddechowego',
+    'Manifestacja_Nos/Ucho/Gardlo': 'Objawy ze strony nosa, ucha lub gardła',
     'Max_CRP': 'Poziom stanu zapalnego w organizmie',
     'Plazmaferezy': 'Przebyte zabiegi oczyszczania krwi',
     'Dializa': 'Historia leczenia nerkozastępczego',

@@ -42,3 +42,5 @@ pytest>=7.4.0
 pytest-cov>=4.1.0
 pytest-asyncio>=0.21.0
 httpx>=0.25.0
+optuna>=4.0.0
+scikit-survival==0.25.0  # survival analysis; 0.25 is the last release compatible with scikit-learn 1.7

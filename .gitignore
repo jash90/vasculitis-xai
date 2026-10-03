@@ -92,3 +92,10 @@ test-*.mjs
 test_screenshots/
 PLAN.md
 .vercel
+
+# local model backups / extra model dirs (large binaries)
+models/_backup_*/
+models/saved_dialysis/**/*.joblib
+
+# Playwright MCP session artifacts
+.playwright-mcp/

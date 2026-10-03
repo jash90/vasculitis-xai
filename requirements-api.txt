@@ -1,0 +1,34 @@
+# Zależności RUNTIME backendu API (obraz Docker).
+# Celowo węższe niż requirements.txt: bez narzędzi dev (jupyter, pytest),
+# bez skryptów pracy (python-docx) oraz bez stosu RAG (langchain, chromadb),
+# którego serwowane endpointy API nie używają (pełny potok RAG żyje w src/agent).
+
+# === Core ML ===
+numpy>=1.24.0
+pandas>=2.0.0
+scikit-learn==1.7.2
+scikit-survival==0.25.0  # /predict/survival; last release compatible with scikit-learn 1.7
+scipy>=1.10.0
+joblib>=1.3.0
+
+# === Modele (wymagane do odczytu artefaktów .joblib i /predict/all) ===
+xgboost>=2.0.0
+lightgbm>=4.0.0
+catboost>=1.2.0
+imbalanced-learn>=0.11.0
+
+# === XAI ===
+shap>=0.43.0
+lime>=0.2.0
+dalex>=1.6.0
+interpret>=0.4.0
+
+# === Wizualizacja (importowana przez moduły XAI) ===
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# === API ===
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.5.0
+python-dotenv>=1.0.0

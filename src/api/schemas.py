@@ -5,6 +5,11 @@ Definiuje modele danych dla requestów i responsów API
 systemu XAI do predykcji śmiertelności.
 """
 
+import json
+import os
+from functools import lru_cache
+from pathlib import Path
+
 from pydantic import BaseModel, Field, validator
 from typing import List, Dict, Any, Optional
 from enum import Enum
@@ -37,39 +42,42 @@ class XAIMethod(str, Enum):
 # ============================================================================
 
 class PatientInput(BaseModel):
-    """Dane wejściowe pacjenta — 20 cech zgodnych z modelem XGBoost."""
+    """Dane wejściowe pacjenta — 20 cech znanych w chwili rozpoznania.
+
+    Pola przebiegu choroby (zaostrzenia wymagające hospitalizacji/OIT, czas
+    sterydoterapii) usunięto z modelu — są znane dopiero po rozpoznaniu.
+    Stare klienty mogą je nadal wysyłać (extra="ignore").
+    """
 
     # Dane demograficzne
     wiek_rozpoznania: Optional[float] = Field(None, ge=0, le=120, description="Wiek w momencie rozpoznania")
     opoznienie_rozpoznia: Optional[float] = Field(None, ge=0, description="Opóźnienie rozpoznania (miesiące)")
 
     # Manifestacje narządowe
-    manifestacja_miesno_szkiel: int = Field(0, ge=0, le=1, description="Mięśniowo-szkieletowy")
-    manifestacja_skora: int = Field(0, ge=0, le=1, description="Skóra")
-    manifestacja_wzrok: int = Field(0, ge=0, le=1, description="Wzrok")
-    manifestacja_sercowo_naczyniowy: int = Field(0, ge=0, le=1, description="Sercowo-naczyniowy")
-    manifestacja_pokarmowy: int = Field(0, ge=0, le=1, description="Pokarmowy")
-    manifestacja_nerki: int = Field(0, ge=0, le=1, description="Nerki")
-    manifestacja_moczowo_plciowy: int = Field(0, ge=0, le=1, description="Moczowo-płciowy")
-    manifestacja_zajecie_csn: int = Field(0, ge=0, le=1, description="Zajęcie CSN")
-    manifestacja_neurologiczny: int = Field(0, ge=0, le=1, description="Neurologiczny")
+    manifestacja_miesno_szkiel: Optional[int] = Field(0, ge=0, le=1, description="Mięśniowo-szkieletowy")
+    manifestacja_skora: Optional[int] = Field(0, ge=0, le=1, description="Skóra")
+    manifestacja_wzrok: Optional[int] = Field(0, ge=0, le=1, description="Wzrok")
+    manifestacja_sercowo_naczyniowy: Optional[int] = Field(0, ge=0, le=1, description="Sercowo-naczyniowy")
+    manifestacja_pokarmowy: Optional[int] = Field(0, ge=0, le=1, description="Pokarmowy")
+    manifestacja_nerki: Optional[int] = Field(0, ge=0, le=1, description="Nerki")
+    manifestacja_moczowo_plciowy: Optional[int] = Field(0, ge=0, le=1, description="Moczowo-płciowy")
+    manifestacja_zajecie_csn: Optional[int] = Field(0, ge=0, le=1, description="Zajęcie CSN")
+    manifestacja_neurologiczny: Optional[int] = Field(0, ge=0, le=1, description="Neurologiczny")
+    manifestacja_oddechowy: Optional[int] = Field(0, ge=0, le=1, description="Układ oddechowy")
+    manifestacja_nos_ucho_gardlo: Optional[int] = Field(0, ge=0, le=1, description="Nos/ucho/gardło")
     liczba_zajetych_narzadow: int = Field(0, ge=0, le=20, description="Liczba zajętych narządów")
-
-    # Przebieg choroby
-    zaostrz_wymagajace_hospital: int = Field(0, ge=0, le=1, description="Zaostrzenia wymagające hospitalizacji")
-    zaostrz_wymagajace_oit: int = Field(0, ge=0, le=1, description="Zaostrzenia wymagające OIT")
 
     # Parametry laboratoryjne
     kreatynina: Optional[float] = Field(None, ge=0, description="Kreatynina (μmol/L)")
+    max_crp: Optional[float] = Field(None, ge=0, le=500, description="CRP (mg/L) przy rozpoznaniu")
     eozynofilia_krwi_obwodowej_wartosc: Optional[float] = Field(None, ge=0, description="Eozynofilia krwi obwodowej (wartość)")
 
     # Leczenie
-    pulsy: int = Field(0, ge=0, le=1, description="Pulsy sterydowe IV")
-    czas_sterydow: Optional[float] = Field(None, ge=0, description="Czas sterydów (miesiące)")
-    plazmaferezy: int = Field(0, ge=0, le=1, description="Plazmaferezy")
+    pulsy: Optional[int] = Field(0, ge=0, le=1, description="Pulsy sterydowe IV")
+    plazmaferezy: Optional[int] = Field(0, ge=0, le=1, description="Plazmaferezy")
 
     # Diagnostyka
-    biopsja_wynik: int = Field(0, ge=0, le=1, description="Wynik biopsji (0=brak/ujemny, 1=dodatni)")
+    biopsja_wynik: Optional[int] = Field(0, ge=0, le=1, description="Biopsja wykonana (0=nie, 1=tak)")
 
     class Config:
         extra = "ignore"
@@ -86,13 +94,13 @@ class PatientInput(BaseModel):
                 "manifestacja_moczowo_plciowy": 0,
                 "manifestacja_zajecie_csn": 0,
                 "manifestacja_neurologiczny": 1,
+                "manifestacja_oddechowy": 1,
+                "manifestacja_nos_ucho_gardlo": 0,
                 "liczba_zajetych_narzadow": 3,
-                "zaostrz_wymagajace_hospital": 1,
-                "zaostrz_wymagajace_oit": 0,
                 "kreatynina": 120,
-                "eozynofilia_krwi_obwodowej_wartosc": 0.5,
+                "max_crp": 45,
+                "eozynofilia_krwi_obwodowej_wartosc": 150,
                 "pulsy": 0,
-                "czas_sterydow": 12,
                 "plazmaferezy": 0,
                 "biopsja_wynik": 1
             }
@@ -225,6 +233,24 @@ class ModelInfo(BaseModel):
     training_date: Optional[str]
     performance_metrics: Dict[str, float]
     version: str
+    details: Optional[Dict[str, Any]] = Field(None, description="Pełne metadane modeli (models_metadata.json)")
+
+
+class SurvivalPoint(BaseModel):
+    """Punkt krzywej przeżycia."""
+    time_years: float
+    survival: float
+
+
+class SurvivalPrediction(BaseModel):
+    """Ryzyko zgonu w czasie z modelu przeżycia."""
+    risk_1y: float
+    risk_3y: float
+    risk_5y: float
+    risk_level: RiskLevel
+    survival_curve: List[SurvivalPoint]
+    model: str
+    metrics: Dict[str, Optional[float]]
 
 
 class GlobalImportance(BaseModel):
@@ -441,6 +467,20 @@ class AgentConversationResponse(BaseModel):
 
 # ============================================================================
 
+ZERO_MEANS_MISSING = {"Wiek_rozpoznania", "Kreatynina", "Max_CRP", "Eozynofilia_Krwi_Obwodowej_Wartosc"}
+_DEFAULT_FEATURE_DEFAULTS_PATH = Path(__file__).resolve().parents[2] / "models" / "saved" / "feature_defaults.json"
+
+
+@lru_cache(maxsize=1)
+def load_feature_defaults() -> Dict[str, float]:
+    """Training medians used for unknown fields (written by scripts/retrain_aligned_models.py)."""
+    path = Path(os.getenv("FEATURE_DEFAULTS_PATH", str(_DEFAULT_FEATURE_DEFAULTS_PATH)))
+    try:
+        return {k: float(v) for k, v in json.loads(path.read_text(encoding="utf-8")).items()}
+    except (OSError, ValueError):
+        return {}
+
+
 def patient_to_array(patient: PatientInput, feature_order: List[str]) -> List[float]:
     """
     Konwertuj PatientInput do tablicy zgodnej z modelem.
@@ -452,7 +492,7 @@ def patient_to_array(patient: PatientInput, feature_order: List[str]) -> List[fl
     Returns:
         Lista wartości cech
     """
-    # Mapowanie nazw z Pydantic na nazwy w modelu (20 cech XGBoost)
+    # Mapowanie nazw z Pydantic na nazwy w modelu (20 cech)
     field_mapping = {
         'wiek_rozpoznania': 'Wiek_rozpoznania',
         'opoznienie_rozpoznia': 'Opoznienie_Rozpoznia',
@@ -466,11 +506,11 @@ def patient_to_array(patient: PatientInput, feature_order: List[str]) -> List[fl
         'manifestacja_zajecie_csn': 'Manifestacja_Zajecie_CSN',
         'manifestacja_neurologiczny': 'Manifestacja_Neurologiczny',
         'liczba_zajetych_narzadow': 'Liczba_Zajetych_Narzadow',
-        'zaostrz_wymagajace_hospital': 'Zaostrz_Wymagajace_Hospital',
-        'zaostrz_wymagajace_oit': 'Zaostrz_Wymagajace_OIT',
+        'manifestacja_oddechowy': 'Manifestacja_Oddechowy',
+        'manifestacja_nos_ucho_gardlo': 'Manifestacja_Nos/Ucho/Gardlo',
         'kreatynina': 'Kreatynina',
+        'max_crp': 'Max_CRP',
         'pulsy': 'Pulsy',
-        'czas_sterydow': 'Czas_Sterydow',
         'plazmaferezy': 'Plazmaferezy',
         'eozynofilia_krwi_obwodowej_wartosc': 'Eozynofilia_Krwi_Obwodowej_Wartosc',
         'biopsja_wynik': 'Biopsja_Wynik',
@@ -480,15 +520,21 @@ def patient_to_array(patient: PatientInput, feature_order: List[str]) -> List[fl
     reverse_mapping = {v: k for k, v in field_mapping.items()}
 
     patient_dict = patient.dict()
+    defaults = load_feature_defaults()
     values = []
 
     for feature in feature_order:
         pydantic_name = reverse_mapping.get(feature)
         if pydantic_name and pydantic_name in patient_dict:
             value = patient_dict[pydantic_name]
-            values.append(value if value is not None else 0)
+            # Brak wartości -> mediana z danych treningowych (ta sama, której używa
+            # imputer w modelu). Zero nie jest realną wartością tych cech.
+            if value is None or (feature in ZERO_MEANS_MISSING and value == 0):
+                values.append(defaults.get(feature, 0.0))
+            else:
+                values.append(value)
         else:
-            values.append(0)
+            values.append(defaults.get(feature, 0.0))
 
     return values
 
@@ -518,7 +564,7 @@ def patients_to_matrix(patients: List[PatientInput], feature_order: List[str]) -
 
     n_patients = len(patients)
     n_features = len(feature_order)
-    X = np.zeros((n_patients, n_features), dtype=np.float32)
+    X = np.zeros((n_patients, n_features), dtype=np.float64)
 
     for i, patient in enumerate(patients):
         X[i] = patient_to_array(patient, feature_order)

@@ -5,6 +5,7 @@ Główny plik API z endpointami dla predykcji,
 wyjaśnień XAI i agenta konwersacyjnego.
 """
 
+import asyncio
 import os
 import sys
 import time
@@ -26,6 +27,10 @@ import uvicorn
 # Dodaj ścieżkę projektu
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from src.api.feature_labels import label as feature_label
+from src.data.cohort import recode as recode_registry
+from src.models.auc_training import INPUT_CODING_RECODED
+
 from .schemas import (
     PatientInput, PredictionOutput, SHAPExplanation, LIMEExplanation,
     PatientExplanation, ModelInfo, GlobalImportance, HealthCheckResponse,
@@ -41,6 +46,7 @@ from .schemas import (
     AgentConversationRequest, AgentConversationResponse,
     # Multi-model schemas
     MultiModelPredictionOutput, ModelPrediction,
+    SurvivalPrediction, SurvivalPoint, load_feature_defaults,
     # DALEX/EBM schemas
     DALEXExplanation, EBMExplanation,
     # AUC offline model schemas
@@ -124,25 +130,22 @@ class AppState:
         """Pobierz global feature importance (z cache)."""
         if self._global_importance_cache is None:
             self._global_importance_cache = {
-                "Wiek": 0.15,
-                "Manifestacja_Nerki": 0.12,
-                "Zaostrz_Wymagajace_OIT": 0.11,
-                "Liczba_Zajetych_Narzadow": 0.10,
-                "Manifestacja_Sercowo-Naczyniowy": 0.09,
-                "Kreatynina": 0.08,
-                "Max_CRP": 0.07,
-                "Dializa": 0.06,
-                "Manifestacja_Zajecie_CSN": 0.05,
-                "Plazmaferezy": 0.04,
-                "Manifestacja_Neurologiczny": 0.03,
-                "Manifestacja_Pokarmowy": 0.02,
-                "Plec": 0.02,
-                "Sterydy_Dawka_g": 0.02,
-                "Czas_Sterydow": 0.01,
-                "Powiklania_Serce/pluca": 0.02,
-                "Powiklania_Infekcja": 0.02,
-                "Wiek_rozpoznania": 0.01,
-                "Opoznienie_Rozpoznia": 0.01
+                # Demo values (no model loaded) - features known at diagnosis only.
+                "Wiek_rozpoznania": 0.15,
+                "Kreatynina": 0.12,
+                "Manifestacja_Nerki": 0.10,
+                "Eozynofilia_Krwi_Obwodowej_Wartosc": 0.09,
+                "Manifestacja_Oddechowy": 0.08,
+                "Liczba_Zajetych_Narzadow": 0.07,
+                "Manifestacja_Skora": 0.06,
+                "Plazmaferezy": 0.05,
+                "Max_CRP": 0.05,
+                "Manifestacja_Sercowo-Naczyniowy": 0.04,
+                "Manifestacja_Zajecie_CSN": 0.04,
+                "Manifestacja_Nos/Ucho/Gardlo": 0.03,
+                "Pulsy": 0.03,
+                "Biopsja_Wynik": 0.02,
+                "Opoznienie_Rozpoznia": 0.02
             }
         return self._global_importance_cache
 
@@ -291,10 +294,8 @@ def get_demo_prediction(patient: PatientInput) -> PredictionOutput:
         risk_score += 0.15
     if patient.manifestacja_zajecie_csn:
         risk_score += 0.2
-    if patient.zaostrz_wymagajace_oit:
-        risk_score += 0.25
-    if patient.zaostrz_wymagajace_hospital:
-        risk_score += 0.1
+    if patient.manifestacja_oddechowy:
+        risk_score += 0.15
     if patient.plazmaferezy:
         risk_score += 0.1
 
@@ -321,11 +322,11 @@ def get_demo_explanation(patient: PatientInput) -> dict:
             "direction": "increases_risk"
         })
 
-    if patient.zaostrz_wymagajace_oit:
+    if patient.manifestacja_oddechowy:
         risk_factors.append({
-            "feature": "Zaostrz_Wymagajace_OIT",
+            "feature": "Manifestacja_Oddechowy",
             "value": 1,
-            "contribution": 0.2,
+            "contribution": 0.1,
             "direction": "increases_risk"
         })
 
@@ -529,6 +530,9 @@ async def predict_auc(request: AUCPredictionInput):
     imputer, selector, scaler = _load_auc_preprocessors(models_dir)
 
     raw_frame = _build_auc_raw_frame(request.features, raw_feature_names)
+    if metadata.get("input_coding") == INPUT_CODING_RECODED:
+        # Same semantic recoding as in training (registry codes -> yes/no/NaN, units).
+        raw_frame = recode_registry(raw_frame, drop_constant=False).reindex(columns=raw_feature_names)
     X_imputed = imputer.transform(raw_frame)
     X_selected = selector.transform(X_imputed)
     X_scaled = scaler.transform(X_selected)
@@ -639,64 +643,37 @@ def batch_predict_vectorized(X: np.ndarray, model) -> Tuple[np.ndarray, np.ndarr
 def get_batch_risk_factors(
     X: np.ndarray,
     feature_names: List[str],
-    top_n: int = 3
+    top_n: int = 3,
+    model=None,
 ) -> List[List[RiskFactorItem]]:
     """
-    Extract top risk factors for each patient using global importance.
-    Fast extraction for batch processing.
+    Per-patient risk factors: change of predicted risk when a feature is replaced by
+    its training median (positive = the patient's value raises risk). One vectorised
+    prediction per feature, so it scales to large batches.
     """
-    global_importance = app_state.get_global_importance()
-    n_patients = X.shape[0]
+    model = model or app_state.model
+    defaults = load_feature_defaults()
+    base = batch_predict_vectorized(X, model)[0]
+    contributions = np.zeros_like(X, dtype=float)
+    for j, name in enumerate(feature_names):
+        if name not in defaults:
+            continue
+        X_ref = X.copy()
+        X_ref[:, j] = defaults[name]
+        contributions[:, j] = base - batch_predict_vectorized(X_ref, model)[0]
+
     results = []
-
-    # Feature name to index mapping
-    feature_idx_map = {name: i for i, name in enumerate(feature_names)}
-
-    # Thresholds for determining risk direction
-    RISK_THRESHOLDS = {
-        "Wiek": 60,
-        "Kreatynina": 150,
-        "Max_CRP": 50,
-        "Liczba_Zajetych_Narzadow": 3,
-    }
-
-    BINARY_RISK_FEATURES = {
-        "Manifestacja_Nerki", "Manifestacja_Sercowo-Naczyniowy",
-        "Manifestacja_Zajecie_CSN", "Zaostrz_Wymagajace_OIT",
-        "Dializa", "Plazmaferezy", "Manifestacja_Neurologiczny",
-        "Manifestacja_Pokarmowy", "Powiklania_Serce/pluca", "Powiklania_Infekcja"
-    }
-
-    for i in range(n_patients):
-        patient_factors = []
-
-        for feature_name, importance in global_importance.items():
-            if feature_name not in feature_idx_map:
-                continue
-
-            idx = feature_idx_map[feature_name]
-            value = float(X[i, idx])
-
-            # Determine direction based on feature type and value
-            if feature_name in BINARY_RISK_FEATURES:
-                direction = "increases_risk" if value == 1 else "decreases_risk"
-            elif feature_name in RISK_THRESHOLDS:
-                threshold = RISK_THRESHOLDS[feature_name]
-                direction = "increases_risk" if value > threshold else "decreases_risk"
-            else:
-                direction = "neutral"
-
-            patient_factors.append(RiskFactorItem(
-                feature=feature_name,
-                value=value,
-                importance=importance,
-                direction=direction
-            ))
-
-        # Sort by importance and take top N
-        patient_factors.sort(key=lambda x: x.importance, reverse=True)
-        results.append(patient_factors[:top_n])
-
+    for i in range(X.shape[0]):
+        order = np.argsort(-np.abs(contributions[i]))[:top_n]
+        results.append([
+            RiskFactorItem(
+                feature=feature_names[j],
+                value=float(X[i, j]),
+                importance=float(abs(contributions[i, j])),
+                direction="increases_risk" if contributions[i, j] > 0 else "decreases_risk",
+            )
+            for j in order if abs(contributions[i, j]) > 1e-6
+        ])
     return results
 
 
@@ -738,7 +715,7 @@ async def predict_batch(request: BatchPatientInput):
             # Extract risk factors if requested
             if request.include_risk_factors:
                 risk_factors = get_batch_risk_factors(
-                    X, app_state.feature_names, request.top_n_factors
+                    X, app_state.feature_names, request.top_n_factors, model=app_state.model
                 )
             else:
                 risk_factors = [None] * n_patients
@@ -1030,22 +1007,22 @@ async def explain_comparison(request: ExplanationRequest):
                         lime_ranking.append(fn)
                     break
 
-        # Oblicz zgodność
-        shap_set = set(shap_ranking[:num_features])
-        lime_set = set(lime_ranking[:num_features])
+        # Zgodność liczona na czołówce rankingu (top-k); dla pełnej listy cech
+        # zbiory byłyby identyczne i zgodność zawsze wynosiłaby 100%.
+        top_k = min(num_features, 5)
+        shap_set = set(shap_ranking[:top_k])
+        lime_set = set(lime_ranking[:top_k])
         common = list(shap_set & lime_set)
         union = shap_set | lime_set
         agreement = len(common) / len(union) if union else 0.0
 
-        # Korelacja Spearmana (na wspólnych cechach)
+        # Korelacja Spearmana pełnych rankingów (cechy obecne w obu)
         spearman_corr = 0.0
-        if len(common) >= 2:
+        shared = [f for f in shap_ranking if f in lime_ranking]
+        if len(shared) >= 2:
             from scipy.stats import spearmanr
-            shap_ranks = [shap_ranking.index(f) for f in common if f in shap_ranking]
-            lime_ranks = [lime_ranking.index(f) for f in common if f in lime_ranking]
-            if len(shap_ranks) >= 2:
-                corr, _ = spearmanr(shap_ranks, lime_ranks)
-                spearman_corr = float(corr) if not np.isnan(corr) else 0.0
+            corr, _ = spearmanr([shap_ranking.index(f) for f in shared], [lime_ranking.index(f) for f in shared])
+            spearman_corr = float(corr) if not np.isnan(corr) else 0.0
 
         return ComparisonResult(
             methods_compared=["SHAP", "LIME"],
@@ -1234,7 +1211,7 @@ async def explain_for_patient(request: PatientExplanationRequest):
             "Wiek": "Twój wiek",
             "Manifestacja_Nerki": "Stan nerek",
             "Manifestacja_Sercowo_Naczyniowy": "Stan układu krążenia",
-            "Zaostrz_Wymagajace_OIT": "Przebyte poważne zaostrzenia",
+            "Manifestacja_Oddechowy": "Stan układu oddechowego",
             "Liczba_Zajetych_Narzadow": "Liczba dotkniętych narządów",
             "Kreatynina": "Wskaźnik czynności nerek",
             "Max_CRP": "Poziom stanu zapalnego"
@@ -1277,55 +1254,125 @@ async def explain_for_patient(request: PatientExplanationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@lru_cache(maxsize=1)
+def _model_global_importance() -> Tuple[Dict[str, float], str, int]:
+    """Permutation importance (ROC AUC drop) of the served model on the hold-out set."""
+    from sklearn.inspection import permutation_importance
+
+    base = Path("models/saved")
+    X_test, y_test = joblib.load(base / "X_test.joblib"), joblib.load(base / "y_test.joblib")
+    result = permutation_importance(app_state.model, X_test, y_test, scoring="roc_auc",
+                                    n_repeats=10, random_state=42)
+    raw = dict(zip(app_state.feature_names, np.clip(result.importances_mean, 0, None)))
+    total = sum(raw.values()) or 1.0
+    importance = dict(sorted(((k, float(v / total)) for k, v in raw.items()), key=lambda kv: -kv[1]))
+    return importance, "Permutation importance (spadek AUC, zbiór testowy)", int(len(y_test))
+
+
 @app.get("/model/global-importance", response_model=GlobalImportance, tags=["Model"])
 async def get_global_importance():
     """
     Pobierz globalną ważność cech.
 
-    Zwraca ranking cech według ich wpływu na predykcje modelu.
+    Dla załadowanego modelu: permutacyjna ważność cech na zbiorze testowym (udział
+    w spadku AUC). W trybie demo: wartości poglądowe.
     """
-    # Demo importance
-    importance = {
-        "Wiek": 0.15,
-        "Manifestacja_Nerki": 0.12,
-        "Zaostrz_Wymagajace_OIT": 0.11,
-        "Liczba_Zajetych_Narzadow": 0.10,
-        "Manifestacja_Sercowo-Naczyniowy": 0.09,
-        "Kreatynina": 0.08,
-        "Max_CRP": 0.07,
-        "Dializa": 0.06,
-        "Manifestacja_Zajecie_CSN": 0.05,
-        "Plazmaferezy": 0.04
-    }
+    if app_state.is_loaded:
+        try:
+            loop = asyncio.get_running_loop()
+            importance, method, n = await loop.run_in_executor(None, _model_global_importance)
+            return GlobalImportance(feature_importance=importance, top_features=list(importance)[:10],
+                                    method=method, n_samples=n)
+        except Exception as e:  # pragma: no cover - falls back to demo values
+            logger.warning(f"Permutation importance unavailable: {e}")
 
+    importance = app_state.get_global_importance()
     return GlobalImportance(
         feature_importance=importance,
-        top_features=list(importance.keys()),
-        method="SHAP TreeExplainer (demo)",
-        n_samples=100
+        top_features=list(importance.keys())[:10],
+        method="Wartości poglądowe (tryb demo)",
+        n_samples=0
     )
+
+
+MODELS_METADATA_PATH = os.getenv("MODELS_METADATA_PATH", "models/saved/models_metadata.json")
+SURVIVAL_MODEL_PATH = os.getenv("SURVIVAL_MODEL_PATH", "models/saved/survival_rsf.joblib")
+
+
+@lru_cache(maxsize=1)
+def _load_models_metadata() -> Optional[Dict[str, Any]]:
+    path = Path(MODELS_METADATA_PATH)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 @app.get("/model/info", response_model=ModelInfo, tags=["Model"])
 async def get_model_info():
     """
-    Pobierz informacje o modelu.
+    Pobierz informacje o modelach.
 
-    Zwraca metadane modelu i metryki wydajności.
+    Metryki pochodzą z `models_metadata.json` zapisanego przy treningu
+    (scripts/retrain_aligned_models.py): walidacja krzyżowa i zbiór testowy.
     """
+    metadata = _load_models_metadata() if app_state.is_loaded else None
+    primary = (metadata or {}).get("classifiers", {}).get("xgboost", {})
+    holdout = primary.get("holdout", {})
     return ModelInfo(
-        model_type="XGBoostClassifier" if app_state.is_loaded else "Demo Model",
+        model_type=f"{primary.get('label', 'XGBoost')} (kalibracja: {primary.get('calibration', '-')})"
+        if metadata else ("XGBoost" if app_state.is_loaded else "Model demonstracyjny"),
         n_features=len(app_state.feature_names) if app_state.feature_names else 20,
-        feature_names=app_state.feature_names or ["Wiek", "Plec", "Manifestacja_Nerki", "..."],
-        training_date="2024-01-15" if app_state.is_loaded else None,
-        performance_metrics={
-            "auc_roc": 0.85,
-            "sensitivity": 0.82,
-            "specificity": 0.78,
-            "ppv": 0.65,
-            "npv": 0.90
+        feature_names=app_state.feature_names or [],
+        training_date=(metadata or {}).get("trained_at"),
+        performance_metrics={k: float(v) for k, v in holdout.items() if isinstance(v, (int, float))},
+        version="2.0.0",
+        details=metadata,
+    )
+
+
+@lru_cache(maxsize=1)
+def _load_survival_model():
+    import sksurv  # noqa: F401  (registers predict_survival_function on sklearn Pipeline)
+
+    path = Path(SURVIVAL_MODEL_PATH)
+    if not path.exists():
+        raise HTTPException(status_code=503, detail="Model przeżycia nie jest dostępny")
+    return joblib.load(path)
+
+
+def _survival_at(times: np.ndarray, surv: np.ndarray, t: float) -> float:
+    """Step-function survival S(t); S = 1 before the first event time."""
+    idx = np.searchsorted(times, t, side="right") - 1
+    return 1.0 if idx < 0 else float(surv[idx])
+
+
+@app.post("/predict/survival", response_model=SurvivalPrediction, tags=["Prediction"])
+async def predict_survival(patient: PatientInput):
+    """
+    Ryzyko zgonu w czasie (1, 3, 5 lat od rozpoznania) z modelu przeżycia
+    (Random Survival Forest) na tych samych 20 cechach co `/predict`.
+    """
+    if not app_state.is_loaded or not app_state.feature_names:
+        raise HTTPException(status_code=503, detail="Model nie jest załadowany")
+    model = _load_survival_model()
+    X = np.array([patient_to_array(patient, app_state.feature_names)], dtype=float)
+    surv = model.predict_survival_function(X, return_array=True)[0]
+    times = np.asarray(model.named_steps["model"].unique_times_, dtype=float)
+    horizon = min(10.0, float(times[-1]))
+    grid = np.round(np.linspace(0.0, horizon, 41), 3)
+    curve = [SurvivalPoint(time_years=float(g), survival=_survival_at(times, surv, g)) for g in grid]
+    risks = {h: 1.0 - _survival_at(times, surv, float(h)) for h in (1, 3, 5)}
+    metadata = (_load_models_metadata() or {}).get("survival", {})
+    return SurvivalPrediction(
+        risk_1y=risks[1], risk_3y=risks[3], risk_5y=risks[5],
+        risk_level=get_risk_level_from_probability(risks[5]),
+        survival_curve=curve,
+        model=metadata.get("model", "Random Survival Forest"),
+        metrics={
+            "cv_harrell_c": metadata.get("cv", {}).get("harrell_c_mean"),
+            "holdout_harrell_c": metadata.get("holdout", {}).get("harrell_c"),
+            "holdout_auc_5y": metadata.get("holdout", {}).get("auc_5y"),
         },
-        version="1.0.0"
     )
 
 
@@ -1411,135 +1458,194 @@ async def agent_predict(patient: PatientInput):
 _COLLECTION_STEPS = [
     {
         "field": "wiek_rozpoznania",
-        "question": "Witaj! Jestem asystentem medycznym systemu Vasculitis XAI.\n\nPomogę Ci ocenić ryzyko śmiertelności u pacjenta z zapaleniem naczyń. Zaczniemy od kilku pytań.\n\n**Jaki jest wiek pacjenta w momencie rozpoznania choroby?** (podaj liczbę lat)",
+        "question": "Witaj! Jestem asystentem systemu Vasculitis XAI.\n\nPomogę ocenić ryzyko zgonu u pacjenta z zapaleniem naczyń na podstawie danych z chwili rozpoznania.\n\n**Ile lat miał pacjent w chwili rozpoznania choroby?**",
         "type": "number",
-        "default": 50,
+        "default": 55,
         "widget": "slider",
-        "min": 0,
-        "max": 100,
+        "min": 18,
+        "max": 90,
         "step": 1,
         "unit": "lat",
+        "skippable": True,
     },
     {
         "field": "opoznienie_rozpoznia",
-        "question": "Ile miesięcy minęło od pierwszych objawów do postawienia diagnozy?\n(Jeśli nie wiesz, wpisz 0)",
+        "question": "Ile **miesięcy** minęło od pierwszych objawów do rozpoznania?",
         "type": "number",
-        "default": 0,
-        "widget": "slider",
-        "min": 0,
-        "max": 24,
-        "step": 1,
-        "unit": "mies.",
-    },
-    {
-        "field": "manifestacja_nerki",
-        "question": "Czy choroba dotknęła **nerek**? (tak/nie)",
-        "type": "boolean",
-        "default": 0,
-        "widget": "buttons",
-        "options": ["tak", "nie", "nie wiem"],
-    },
-    {
-        "field": "manifestacja_sercowo_naczyniowy",
-        "question": "Czy występują objawy ze strony **układu sercowo-naczyniowego**? (tak/nie)",
-        "type": "boolean",
-        "default": 0,
-        "widget": "buttons",
-        "options": ["tak", "nie", "nie wiem"],
-    },
-    {
-        "field": "manifestacja_zajecie_csn",
-        "question": "Czy choroba dotknęła **ośrodkowy układ nerwowy** (mózg, rdzeń)? (tak/nie)",
-        "type": "boolean",
-        "default": 0,
-        "widget": "buttons",
-        "options": ["tak", "nie", "nie wiem"],
-    },
-    {
-        "field": "manifestacja_neurologiczny",
-        "question": "Czy występują objawy **neurologiczne obwodowe** (neuropatia)? (tak/nie)",
-        "type": "boolean",
-        "default": 0,
-        "widget": "buttons",
-        "options": ["tak", "nie", "nie wiem"],
-    },
-    {
-        "field": "liczba_zajetych_narzadow",
-        "question": "Ile **narządów ogólnie** jest objętych chorobą? (podaj liczbę 1-10)",
-        "type": "number",
-        "default": 1,
-        "widget": "slider",
-        "min": 0,
-        "max": 5,
-        "step": 1,
-        "unit": "",
-    },
-    {
-        "field": "zaostrz_wymagajace_hospital",
-        "question": "Czy wystąpiły zaostrzenia wymagające **hospitalizacji**? (tak/nie)",
-        "type": "boolean",
-        "default": 0,
-        "widget": "buttons",
-        "options": ["tak", "nie"],
-    },
-    {
-        "field": "zaostrz_wymagajace_oit",
-        "question": "Czy wystąpiły zaostrzenia wymagające pobytu na **OIT** (oddział intensywnej terapii)? (tak/nie)",
-        "type": "boolean",
-        "default": 0,
-        "widget": "buttons",
-        "options": ["tak", "nie"],
-    },
-    {
-        "field": "kreatynina",
-        "question": "Jaki jest poziom **kreatyniny** (μmol/L)?\n(Norma: 60-110. Jeśli nieznane, wpisz 0)",
-        "type": "number",
-        "default": 0,
-        "widget": "slider",
-        "min": 80,
-        "max": 300,
-        "step": 1,
-        "unit": "μmol/L",
-    },
-    {
-        "field": "czas_sterydow",
-        "question": "Ile **miesięcy** pacjent jest leczony sterydami? (podaj liczbę lub 0)",
-        "type": "number",
-        "default": 0,
+        "default": 3,
         "widget": "slider",
         "min": 0,
         "max": 36,
         "step": 1,
         "unit": "mies.",
+        "skippable": True,
+    },
+    {
+        "field": "manifestacja_nerki",
+        "question": "Czy choroba objęła **nerki**?",
+        "type": "boolean",
+        "default": None,
+        "widget": "buttons",
+        "options": ["tak", "nie", "nie wiem"],
+    },
+    {
+        "field": "manifestacja_oddechowy",
+        "question": "Czy choroba objęła **układ oddechowy** (płuca, oskrzela)?",
+        "type": "boolean",
+        "default": None,
+        "widget": "buttons",
+        "options": ["tak", "nie", "nie wiem"],
+    },
+    {
+        "field": "manifestacja_nos_ucho_gardlo",
+        "question": "Czy występują objawy ze strony **nosa, ucha lub gardła**?",
+        "type": "boolean",
+        "default": None,
+        "widget": "buttons",
+        "options": ["tak", "nie", "nie wiem"],
+    },
+    {
+        "field": "manifestacja_sercowo_naczyniowy",
+        "question": "Czy choroba objęła **serce lub naczynia**?",
+        "type": "boolean",
+        "default": None,
+        "widget": "buttons",
+        "options": ["tak", "nie", "nie wiem"],
+    },
+    {
+        "field": "manifestacja_pokarmowy",
+        "question": "Czy choroba objęła **układ pokarmowy**?",
+        "type": "boolean",
+        "default": None,
+        "widget": "buttons",
+        "options": ["tak", "nie", "nie wiem"],
+    },
+    {
+        "field": "manifestacja_zajecie_csn",
+        "question": "Czy choroba objęła **ośrodkowy układ nerwowy** (mózg, rdzeń)?",
+        "type": "boolean",
+        "default": None,
+        "widget": "buttons",
+        "options": ["tak", "nie", "nie wiem"],
+    },
+    {
+        "field": "manifestacja_neurologiczny",
+        "question": "Czy występują objawy **obwodowego układu nerwowego** (neuropatia)?",
+        "type": "boolean",
+        "default": None,
+        "widget": "buttons",
+        "options": ["tak", "nie", "nie wiem"],
+    },
+    {
+        "field": "manifestacja_skora",
+        "question": "Czy choroba objęła **skórę**?",
+        "type": "boolean",
+        "default": None,
+        "widget": "buttons",
+        "options": ["tak", "nie", "nie wiem"],
+    },
+    {
+        "field": "kreatynina",
+        "question": "Jakie było stężenie **kreatyniny** przy rozpoznaniu (μmol/L)?\n(Norma ok. 60–110. Jeśli nie znasz — wybierz „nie wiem”.)",
+        "type": "number",
+        "default": 100,
+        "widget": "slider",
+        "min": 40,
+        "max": 800,
+        "step": 5,
+        "unit": "μmol/L",
+        "skippable": True,
+    },
+    {
+        "field": "max_crp",
+        "question": "Jakie było stężenie **CRP** przy rozpoznaniu (mg/L)?\n(Norma < 5. Jeśli nie znasz — wybierz „nie wiem”.)",
+        "type": "number",
+        "default": 30,
+        "widget": "slider",
+        "min": 0,
+        "max": 300,
+        "step": 1,
+        "unit": "mg/L",
+        "skippable": True,
+    },
+    {
+        "field": "eozynofilia_krwi_obwodowej_wartosc",
+        "question": "Ile wynosiła **liczba eozynofili** we krwi obwodowej (/μL)?\n(Jeśli nie znasz — wybierz „nie wiem”.)",
+        "type": "number",
+        "default": 150,
+        "widget": "slider",
+        "min": 0,
+        "max": 3000,
+        "step": 10,
+        "unit": "/μL",
+        "skippable": True,
+    },
+    {
+        "field": "pulsy",
+        "question": "Czy w leczeniu indukcyjnym podano **pulsy sterydowe dożylnie**?",
+        "type": "boolean",
+        "default": None,
+        "widget": "buttons",
+        "options": ["tak", "nie", "nie wiem"],
     },
     {
         "field": "plazmaferezy",
-        "question": "Czy pacjentowi wykonywano **plazmaferezy** (oczyszczanie krwi)? (tak/nie)",
+        "question": "Czy wykonywano **plazmaferezy**?",
         "type": "boolean",
-        "default": 0,
+        "default": None,
         "widget": "buttons",
-        "options": ["tak", "nie"],
+        "options": ["tak", "nie", "nie wiem"],
     },
     {
         "field": "biopsja_wynik",
-        "question": "Czy wynik **biopsji** był dodatni? (tak/nie/nie wiem)",
+        "question": "Czy wykonano **biopsję**?",
         "type": "boolean",
-        "default": 0,
+        "default": None,
         "widget": "buttons",
         "options": ["tak", "nie", "nie wiem"],
     },
 ]
 
 # Domyślne wartości dla pól, które nie są zbierane przez agenta
+_MANIFESTATION_FIELDS = (
+    "manifestacja_nerki", "manifestacja_oddechowy", "manifestacja_nos_ucho_gardlo",
+    "manifestacja_sercowo_naczyniowy", "manifestacja_pokarmowy", "manifestacja_zajecie_csn",
+    "manifestacja_neurologiczny", "manifestacja_skora",
+)
+# Not asked in the conversation -> unknown (training median used by the model)
 _DEFAULT_EXTRA_FIELDS = {
-    "manifestacja_miesno_szkiel": 0,
-    "manifestacja_skora": 0,
-    "manifestacja_wzrok": 0,
-    "manifestacja_pokarmowy": 0,
-    "manifestacja_moczowo_plciowy": 0,
-    "eozynofilia_krwi_obwodowej_wartosc": 0,
-    "pulsy": 0,
+    "manifestacja_miesno_szkiel": None,
+    "manifestacja_wzrok": None,
+    "manifestacja_moczowo_plciowy": None,
 }
+
+
+def _ask_step(idx: int, collected: Dict[str, Any], prefix: str = "") -> AgentConversationResponse:
+    """Response asking question `idx` (0-based), with widget metadata for the frontend."""
+    step = _COLLECTION_STEPS[idx]
+    field_meta = {"field": step["field"], "type": step["type"], "widget": step.get("widget", "input")}
+    for key in ("min", "max", "step", "unit", "options", "default"):
+        if step.get(key) is not None:
+            field_meta[key] = step[key]
+    if step.get("skippable"):
+        field_meta["skippable"] = True
+    return AgentConversationResponse(
+        response=f"{prefix}[{idx + 1}/{len(_COLLECTION_STEPS)}] {step['question']}",
+        collected_data=collected,
+        current_step=idx + 1,
+        phase="collecting",
+        missing_fields=[s["field"] for s in _COLLECTION_STEPS[idx:]],
+        follow_up_suggestions=step.get("options", []),
+        field_meta=field_meta,
+    )
+
+
+def _agent_patient(collected: Dict[str, Any]) -> PatientInput:
+    """Build PatientInput from conversation answers; organ count derived from answers."""
+    data = dict(_DEFAULT_EXTRA_FIELDS)
+    data.update(collected)
+    data["liczba_zajetych_narzadow"] = int(sum(1 for f in _MANIFESTATION_FIELDS if data.get(f) == 1))
+    return PatientInput(**data)
 
 
 def _parse_boolean(value: str) -> int:
@@ -1596,24 +1702,15 @@ async def agent_conversation(request: AgentConversationRequest):
             message_lower = user_message.lower()
 
             if any(kw in message_lower for kw in ['nowy', 'nowa', 'restart', 'jeszcze raz', 'od nowa']):
-                return AgentConversationResponse(
-                    response="Okej, zaczynamy od nowa!\n\n" + _COLLECTION_STEPS[0]["question"],
-                    collected_data={},
-                    current_step=1,
-                    phase="collecting",
-                    missing_fields=[s["field"] for s in _COLLECTION_STEPS],
-                    follow_up_suggestions=_COLLECTION_STEPS[0].get("suggestions", ["40", "55", "65", "75"]),
-                )
+                return _ask_step(0, {}, prefix="Zaczynamy od nowa.\n\n")
 
             if any(kw in message_lower for kw in ['czynnik', 'wpływa', 'dlaczego', 'shap']):
-                patient_data = dict(collected)
-                patient_data.update(_DEFAULT_EXTRA_FIELDS)
-                pred_data = await run_prediction_tool(PatientInput(**patient_data))
+                pred_data = await run_prediction_tool(_agent_patient(collected))
                 factor_text = "Szczegółowe zestawienie czynników:\n\n"
                 sorted_f = sorted(pred_data.factors, key=lambda f: abs(f.contribution), reverse=True)
                 for i, f in enumerate(sorted_f[:8], 1):
                     direction = "↑ zwiększa" if f.contribution > 0 else "↓ zmniejsza"
-                    factor_text += f"{i}. **{f.feature}**: {direction} ryzyko ({f.contribution:+.3f})\n"
+                    factor_text += f"{i}. **{feature_label(f.feature)}**: {direction} ryzyko ({f.contribution:+.3f})\n"
                 factor_text += "\nCzy chcesz dowiedzieć się więcej o konkretnym czynniku?"
                 return AgentConversationResponse(
                     response=factor_text,
@@ -1655,7 +1752,7 @@ Czy masz jeszcze pytania?""",
 - Wiek w momencie rozpoznania
 - Zajęcie nerek, serca, OUN
 - Liczba zajętych narządów
-- Przebieg zaostrzeń
+- Czynność nerek (kreatynina) i stan zapalny przy rozpoznaniu
 
 **Leczenie:** glikokortykosteroidy, cyklofosfamid, rytuksymab, a w ciężkich przypadkach plazmafereza.
 
@@ -1691,22 +1788,21 @@ O co chciałbyś zapytać?""",
                 step = _COLLECTION_STEPS[current_step - 1]
 
                 if _is_skip(user_message):
-                    collected[step["field"]] = step["default"]
+                    collected[step["field"]] = None  # unknown -> training median in the model
                 elif step["type"] == "boolean":
                     collected[step["field"]] = _parse_boolean(user_message)
                 elif step["type"] == "number":
                     parsed = _parse_number(user_message)
-                    collected[step["field"]] = parsed if parsed is not None else step["default"]
+                    if parsed is not None and step.get("min") is not None:
+                        parsed = min(max(parsed, step["min"]), step.get("max", parsed))
+                    collected[step["field"]] = parsed
                 else:
-                    collected[step["field"]] = step["default"]
+                    collected[step["field"]] = None
 
             # Check if we've collected all steps
             if current_step >= len(_COLLECTION_STEPS):
                 # All data collected → prediction!
-                patient_data = dict(collected)
-                patient_data.update(_DEFAULT_EXTRA_FIELDS)
-
-                pred_data = await run_prediction_tool(PatientInput(**patient_data))
+                pred_data = await run_prediction_tool(_agent_patient(collected))
 
                 risk_level_pl = {
                     "low": "Niskie",
@@ -1726,11 +1822,11 @@ O co chciałbyś zapytać?""",
                 if risk_factors:
                     response += "\n**Czynniki zwiększające ryzyko:**\n"
                     for f in risk_factors:
-                        response += f"- {f.feature}: +{f.contribution:.3f}\n"
+                        response += f"- {feature_label(f.feature)}: +{f.contribution:.3f}\n"
                 if protective_factors:
                     response += "\n**Czynniki zmniejszające ryzyko:**\n"
                     for f in protective_factors:
-                        response += f"- {f.feature}: {f.contribution:.3f}\n"
+                        response += f"- {feature_label(f.feature)}: {f.contribution:.3f}\n"
 
                 response += """\nPoniżej znajdziesz interaktywne wykresy. Możesz mnie teraz pytać o:\n- Czynniki wpływające na wynik\n- Zalecenia\n- Informacje o zapaleniu naczyń\n- Rozpocząć analizę nowego pacjenta"""
 
@@ -1744,54 +1840,11 @@ O co chciałbyś zapytać?""",
                 )
 
             # Ask the next question
-            next_step_idx = current_step
-            if next_step_idx < len(_COLLECTION_STEPS):
-                next_step = _COLLECTION_STEPS[next_step_idx]
-                progress = f"[{next_step_idx + 1}/{len(_COLLECTION_STEPS)}]"
-                question = f"{progress} {next_step['question']}"
-
-                # Build field_meta for frontend widget rendering
-                field_meta = {
-                    "field": next_step["field"],
-                    "type": next_step["type"],
-                    "widget": next_step.get("widget", "input"),
-                }
-                if next_step.get("min") is not None:
-                    field_meta["min"] = next_step["min"]
-                if next_step.get("max") is not None:
-                    field_meta["max"] = next_step["max"]
-                if next_step.get("step") is not None:
-                    field_meta["step"] = next_step["step"]
-                if next_step.get("unit"):
-                    field_meta["unit"] = next_step["unit"]
-                if next_step.get("options"):
-                    field_meta["options"] = next_step["options"]
-
-                return AgentConversationResponse(
-                    response=question,
-                    collected_data=collected,
-                    current_step=next_step_idx + 1,
-                    phase="collecting",
-                    missing_fields=[s["field"] for s in _COLLECTION_STEPS[next_step_idx:]],
-                    follow_up_suggestions=next_step.get("options", []),
-                    field_meta=field_meta,
-                )
+            if current_step < len(_COLLECTION_STEPS):
+                return _ask_step(current_step, collected)
 
         # Fallback — start over
-        return AgentConversationResponse(
-            response="Zaczynamy od nowa!\n\n" + _COLLECTION_STEPS[0]["question"],
-            collected_data={},
-            current_step=1,
-            phase="collecting",
-            missing_fields=[s["field"] for s in _COLLECTION_STEPS],
-            follow_up_suggestions=_COLLECTION_STEPS[0].get("options", []),
-            field_meta={
-                "field": _COLLECTION_STEPS[0]["field"],
-                "type": _COLLECTION_STEPS[0]["type"],
-                "widget": _COLLECTION_STEPS[0].get("widget", "input"),
-                **({"min": _COLLECTION_STEPS[0]["min"], "max": _COLLECTION_STEPS[0]["max"], "step": _COLLECTION_STEPS[0]["step"], "unit": _COLLECTION_STEPS[0]["unit"]} if _COLLECTION_STEPS[0].get("widget") == "slider" else {}),
-            },
-        )
+        return _ask_step(0, {})
 
     except HTTPException:
         raise
@@ -1844,12 +1897,12 @@ def _build_prediction_response(pred_result: PredictionOutput, factor_data: list)
         if risk_factors:
             response += "\n**Czynniki zwiększające ryzyko:**\n"
             for f in risk_factors[:5]:
-                response += f"- {f.feature}: +{f.contribution:.3f}\n"
+                response += f"- {feature_label(f.feature)}: +{f.contribution:.3f}\n"
 
         if protective_factors:
             response += "\n**Czynniki zmniejszające ryzyko:**\n"
             for f in protective_factors[:5]:
-                response += f"- {f.feature}: {f.contribution:.3f}\n"
+                response += f"- {feature_label(f.feature)}: {f.contribution:.3f}\n"
 
     response += """\nPoniżej znajdziesz interaktywne wykresy z szczegółową analizą.\n\nCzy chciałbyś/chciałabyś dowiedzieć się więcej o konkretnych czynnikach?"""
 
@@ -1867,7 +1920,7 @@ def _build_factor_response(factor_data: list) -> str:
 
     for i, f in enumerate(sorted_factors[:8], 1):
         direction = "↑ zwiększa" if f.contribution > 0 else "↓ zmniejsza"
-        response += f"{i}. **{f.feature}**: {direction} ryzyko (wpływ: {f.contribution:+.3f})\n"
+        response += f"{i}. **{feature_label(f.feature)}**: {direction} ryzyko (wpływ: {f.contribution:+.3f})\n"
 
     response += "\nCzy chcesz dowiedzieć się więcej o którymś z tych czynników?"
     return response

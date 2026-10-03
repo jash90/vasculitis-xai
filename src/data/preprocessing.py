@@ -381,6 +381,12 @@ class DataPreprocessor:
         """
         Pełny pipeline preprocessingu.
 
+        UWAGA (przestarzałe, przeciek danych): imputacja, filtr korelacji,
+        selekcja cech (z użyciem y) i skalowanie są dopasowywane do CAŁEGO
+        przekazanego zbioru, zanim nastąpi podział train/test. Kod 0 nie jest
+        traktowany jako brak danych. Do nowych modeli używaj src.data.cohort
+        + pipeline'ów z src.models.model_zoo (dopasowanie wewnątrz foldów).
+
         Args:
             df: DataFrame z danymi
             target_col: Nazwa kolumny docelowej

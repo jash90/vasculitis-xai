@@ -530,6 +530,8 @@ class SHAPExplainer:
         translations = feature_translations or {
             'Wiek': 'Twój wiek',
             'Kreatynina': 'Poziom wskaźnika czynności nerek',
+            'Manifestacja_Oddechowy': 'Stan układu oddechowego',
+            'Manifestacja_Nos/Ucho/Gardlo': 'Objawy ze strony nosa, ucha lub gardła',
             'Max_CRP': 'Poziom stanu zapalnego',
             'Liczba_Zajetych_Narzadow': 'Liczba narządów objętych chorobą',
             'Manifestacja_Sercowo-Naczyniowy': 'Stan układu sercowo-naczyniowego',

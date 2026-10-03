@@ -145,7 +145,7 @@ class DALEXWrapper:
 
         contributions = []
         for _, row in result_df.iterrows():
-            if row['variable_name'] not in ['intercept', 'prediction']:
+            if row['variable'] not in ['intercept', 'prediction']:
                 contributions.append({
                     'variable': row['variable_name'],
                     'variable_value': row['variable_value'],
@@ -154,8 +154,9 @@ class DALEXWrapper:
                 })
 
         # Predykcja
-        intercept_row = result_df[result_df['variable_name'] == 'intercept']
-        prediction_row = result_df[result_df['variable_name'] == 'prediction']
+        # dalex: variable_name is '' for the prediction row, so match on `variable`
+        intercept_row = result_df[result_df['variable'] == 'intercept']
+        prediction_row = result_df[result_df['variable'] == 'prediction']
 
         explanation = {
             'intercept': float(intercept_row['contribution'].values[0]) if len(intercept_row) > 0 else 0,
@@ -242,7 +243,7 @@ class DALEXWrapper:
 
     def get_variable_importance(
         self,
-        loss_function: str = 'one_minus_auc',
+        loss_function: str = '1-auc',
         B: int = 10,
         variables: Optional[List[str]] = None
     ) -> Dict[str, float]:
@@ -265,12 +266,14 @@ class DALEXWrapper:
         )
 
         result_df = vi.result
+        full_model_loss = float(result_df.loc[result_df['variable'] == '_full_model_', 'dropout_loss'].iloc[0])
 
+        # Importance = loss increase after permuting the feature (clipped at 0)
         importance = {}
         for _, row in result_df.iterrows():
             var_name = row['variable']
             if var_name not in ['_baseline_', '_full_model_']:
-                importance[var_name] = float(row['dropout_loss'])
+                importance[var_name] = max(0.0, float(row['dropout_loss']) - full_model_loss)
 
         # Posortuj
         importance_sorted = dict(

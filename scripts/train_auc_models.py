@@ -3,9 +3,18 @@
 Train the full-feature AUC-first model comparison.
 
 This script is separate from scripts/retrain_aligned_models.py. The aligned
-script keeps the API's 20-feature patient form usable; this one optimizes the
-offline AUC table on the richer clinical dataset and saves its own artifacts.
+script keeps the API's 20-feature patient form usable; this one compares models
+on the richer clinical dataset and saves its own artifacts.
+
+By default the registry is recoded (src/data/cohort.py), restricted to features
+known at diagnosis, and the best model is selected by CV on the training split.
+--legacy reproduces the previous (leaky) setup for comparison only.
+
+    venv/bin/python scripts/train_auc_models.py                                   # models/saved/auc (k=30)
+    venv/bin/python scripts/train_auc_models.py --n-features 0 --output-dir models/saved/auc_all
 """
+
+import json
 
 import argparse
 import sys
@@ -15,7 +24,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.models.auc_training import DEFAULT_N_FEATURES, train_auc_models
+from src.models.auc_training import train_auc_models
 
 
 warnings.filterwarnings(
@@ -40,9 +49,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--n-features",
-        default=DEFAULT_N_FEATURES,
+        default=30,
         type=int,
-        help="Number of selected features.",
+        help="Number of features kept by in-train mutual-information selection (0 = all).",
     )
     parser.add_argument(
         "--models",
@@ -54,6 +63,17 @@ def parse_args() -> argparse.Namespace:
         "--skip-stacking",
         action="store_true",
         help="Skip the slower stacking model.",
+    )
+    parser.add_argument(
+        "--legacy",
+        action="store_true",
+        help="Previous setup: raw codes, all columns (incl. follow-up data). For comparison only.",
+    )
+    parser.add_argument(
+        "--params-json",
+        type=Path,
+        default=None,
+        help="Optional JSON {model_key: {param: value}} with hyperparameters tuned on training data.",
     )
     parser.add_argument(
         "--random-state",
@@ -72,6 +92,7 @@ def main() -> int:
     print(f"  output:     {args.output_dir}")
     print(f"  n_features: {args.n_features}")
 
+    overrides = json.loads(args.params_json.read_text()) if args.params_json else None
     result = train_auc_models(
         args.data,
         args.output_dir,
@@ -79,14 +100,17 @@ def main() -> int:
         n_features=args.n_features,
         random_state=args.random_state,
         include_stacking=not args.skip_stacking,
+        registry_recoding=not args.legacy,
+        param_overrides=overrides,
     )
 
     print("\nModel comparison:")
-    print("Model                 AUC    AP     Accuracy Recall Specificity Precision F1")
-    print("-" * 78)
+    print("Model                CV-AUC  test-AUC AP     Accuracy Recall Specificity Precision F1")
+    print("-" * 88)
     for row in result["comparison"]:
         print(
             f"{row['model']:<20} "
+            f"{row['cv_auc_train']:.3f}   "
             f"{row['auc']:.3f}  "
             f"{row['ap']:.3f}  "
             f"{row['accuracy']:.3f}    "
